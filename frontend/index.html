@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hermes 专家配置与飞书服务平台</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --border: #e3e6ea;
+    --text: #1f2329; --muted: #8a9099;
+    --primary: #3370ff; --primary-hover: #2859cc;
+    --danger: #e5484d; --ok: #30a46c; --warn: #f5a623;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--text); font-size: 14px; }
+  a { color: var(--primary); }
+  button { cursor: pointer; font-family: inherit; }
+  input, textarea, select { font-family: inherit; font-size: 14px; }
+
+  /* Login */
+  #login-view { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .login-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+                padding: 40px 36px; width: 360px; box-shadow: 0 8px 30px rgba(0,0,0,.06); }
+  .login-card h1 { font-size: 20px; margin: 0 0 4px; }
+  .login-card .sub { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+  .login-card label { display: block; margin: 14px 0 6px; color: var(--muted); font-size: 13px; }
+  .login-card input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+  .login-card input:focus { outline: none; border-color: var(--primary); }
+  .login-card .btn { width: 100%; margin-top: 22px; }
+
+  /* Layout */
+  header { background: var(--card); border-bottom: 1px solid var(--border); padding: 0 24px;
+           display: flex; align-items: center; height: 56px; position: sticky; top: 0; z-index: 10; }
+  header .logo { font-weight: 700; font-size: 16px; }
+  header .spacer { flex: 1; }
+  header .user { color: var(--muted); margin-right: 16px; }
+
+  nav { background: var(--card); border-bottom: 1px solid var(--border); padding: 0 24px;
+        display: flex; gap: 4px; position: sticky; top: 56px; z-index: 9; }
+  nav .tab { padding: 12px 18px; color: var(--muted); border: none; background: none;
+             border-bottom: 2px solid transparent; font-size: 14px; }
+  nav .tab:hover { color: var(--text); }
+  nav .tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+
+  main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+  .section { display: none; }
+  .section.active { display: block; }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+          padding: 20px; margin-bottom: 20px; }
+  .card h2 { margin: 0 0 16px; font-size: 16px; }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .toolbar .spacer { flex: 1; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+  tr:hover td { background: #fafbfc; }
+  .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 12px; background: #eef2ff; color: var(--primary); margin: 1px 3px 1px 0; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+  .pill.ok { background: #e6f4ea; color: var(--ok); }
+  .pill.err { background: #fdebec; color: var(--danger); }
+
+  .btn { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: #fff; color: var(--text); }
+  .btn:hover { border-color: #cfd4da; }
+  .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .btn.primary:hover { background: var(--primary-hover); }
+  .btn.danger { color: var(--danger); border-color: #f2c3c5; }
+  .btn.small { padding: 4px 10px; font-size: 12px; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .form-grid .full { grid-column: 1 / -1; }
+  .field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
+  .field input, .field textarea, .field select { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; }
+  .field textarea { min-height: 90px; resize: vertical; }
+  .field textarea.tall { min-height: 180px; }
+  .field input:focus, .field textarea:focus, .field select:focus { outline: none; border-color: var(--primary); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+  .checkbox-list { max-height: 180px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+  .checkbox-list label { display: block; padding: 4px 0; }
+  .checkbox-list input { margin-right: 8px; }
+
+  /* Modal */
+  #modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 100;
+                   align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; }
+  #modal-overlay.open { display: flex; }
+  #modal { background: #fff; border-radius: 12px; width: 720px; max-width: 100%; padding: 24px; }
+  #modal h3 { margin: 0 0 20px; font-size: 18px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+  .pre { background: #0f1419; color: #e6edf3; border-radius: 8px; padding: 14px; overflow: auto;
+         font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .status-dot.on { background: var(--ok); }
+  .status-dot.off { background: var(--muted); }
+
+  .toast { position: fixed; bottom: 24px; right: 24px; background: #1f2329; color: #fff; padding: 12px 18px;
+           border-radius: 8px; z-index: 200; opacity: 0; transform: translateY(8px); transition: all .2s; }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.err { background: var(--danger); }
+
+  .empty { color: var(--muted); text-align: center; padding: 30px 0; }
+</style>
+</head>
+<body>
+
+<!-- ===================== 登录 ===================== -->
+<div id="login-view">
+  <div class="login-card">
+    <h1>Hermes 专家配置平台</h1>
+    <p class="sub">专家 · Skill · MCP 配置与飞书路由</p>
+    <label>用户名</label>
+    <input id="login-username" placeholder="admin" autocomplete="username">
+    <label>密码</label>
+    <input id="login-password" type="password" placeholder="••••••" autocomplete="current-password">
+    <button class="btn primary" id="login-btn" onclick="doLogin()">登 录</button>
+  </div>
+</div>
+
+<!-- ===================== 主界面 ===================== -->
+<div id="app-view" style="display:none">
+  <header>
+    <div class="logo">Hermes 专家配置与飞书服务平台</div>
+    <div class="spacer"></div>
+    <span class="user" id="header-user"></span>
+    <button class="btn small" onclick="doLogout()">退出</button>
+  </header>
+  <nav>
+    <button class="tab active" data-tab="experts">专家管理</button>
+    <button class="tab" data-tab="skills">Skill 管理</button>
+    <button class="tab" data-tab="mcp">MCP 管理</button>
+    <button class="tab" data-tab="settings">平台设置</button>
+    <button class="tab" data-tab="logs">调用日志</button>
+  </nav>
+
+  <main>
+    <!-- 专家管理 -->
+    <section id="section-experts" class="section active">
+      <div class="card">
+        <div class="toolbar">
+          <h2 style="margin:0">专家列表</h2>
+          <div class="spacer"></div>
+          <button class="btn primary" onclick="openExpertModal()">+ 新建专家</button>
+        </div>
+        <table>
+          <thead><tr><th>ID</th><th>名称</th><th>Profile</th><th>模型</th><th>Skill</th><th>MCP</th><th>操作</th></tr></thead>
+          <tbody id="experts-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Skill 管理 -->
+    <section id="section-skills" class="section">
+      <div class="card">
+        <div class="toolbar">
+          <h2 style="margin:0">Skill 列表</h2>
+          <div class="spacer"></div>
+          <button class="btn primary" onclick="openSkillModal()">+ 新建 Skill</button>
+        </div>
+        <table>
+          <thead><tr><th>ID</th><th>名称</th><th>版本</th><th>分类</th><th>描述</th><th>标签</th><th>操作</th></tr></thead>
+          <tbody id="skills-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- MCP 管理 -->
+    <section id="section-mcp" class="section">
+      <div class="card">
+        <div class="toolbar">
+          <h2 style="margin:0">MCP Server 列表</h2>
+          <div class="spacer"></div>
+          <button class="btn primary" onclick="openMcpModal()">+ 新建 MCP Server</button>
+        </div>
+        <table>
+          <thead><tr><th>ID</th><th>名称</th><th>传输</th><th>配置模板</th><th>工具过滤</th><th>操作</th></tr></thead>
+          <tbody id="mcp-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 平台设置 -->
+    <section id="section-settings" class="section">
+      <div class="card">
+        <h2>Hermes Agent 接入</h2>
+        <div class="form-grid">
+          <div class="field full">
+            <label>API URL</label>
+            <input id="set-hermes-url" placeholder="http://localhost:8642">
+          </div>
+          <div class="field full">
+            <label>API Key（API_SERVER_KEY）</label>
+            <input id="set-hermes-key" placeholder="Hermes API Server Key">
+          </div>
+        </div>
+        <div class="toolbar" style="margin-top:14px">
+          <button class="btn primary" onclick="saveSettings()">保存 Hermes 配置</button>
+          <button class="btn" onclick="testHermes()">测试连接</button>
+          <span id="test-result"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 id="feishu-config-title">飞书配置</h2>
+        <div class="form-grid">
+          <div class="field" id="f-field-appid">
+            <label>App ID（模式 A 全局）</label>
+            <input id="set-feishu-app-id">
+          </div>
+          <div class="field" id="f-field-appsecret">
+            <label>App Secret（模式 A 全局）</label>
+            <input id="set-feishu-app-secret" type="password">
+          </div>
+          <div class="field">
+            <label>模式</label>
+            <select id="set-feishu-mode" onchange="updateFeishuModeUI()">
+              <option value="A">A — 单机器人 + 路由</option>
+              <option value="B">B — 一专家一机器人</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>默认模型 / DeepSeek Key</label>
+            <input id="set-default-model" placeholder="deepseek-chat">
+            <input id="set-deepseek-key" placeholder="DeepSeek API Key（可选，透传给 Hermes）" style="margin-top:8px">
+          </div>
+        </div>
+        <div class="hint" id="feishu-mode-hint" style="margin-top:12px"></div>
+        <div class="toolbar" style="margin-top:14px">
+          <button class="btn primary" onclick="saveFeishuAndStart()">保存并启动连接</button>
+          <button class="btn" onclick="saveSettings()">仅保存</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>飞书连接控制</h2>
+        <div class="toolbar">
+          <span><span class="status-dot off" id="feishu-dot"></span>状态：<b id="feishu-status">未知</b></span>
+          <div class="spacer"></div>
+          <button class="btn primary" onclick="feishuAction('start')">启动连接</button>
+          <button class="btn" onclick="feishuAction('restart')">重启连接</button>
+          <button class="btn danger" onclick="feishuAction('stop')">停止连接</button>
+        </div>
+        <div class="hint" id="feishu-bots"></div>
+      </div>
+    </section>
+
+    <!-- 调用日志 -->
+    <section id="section-logs" class="section">
+      <div class="card">
+        <div class="toolbar">
+          <h2 style="margin:0">调用日志</h2>
+          <div class="spacer"></div>
+          <select id="log-status" onchange="loadLogs()">
+            <option value="">全部状态</option>
+            <option value="success">成功</option>
+            <option value="error">失败</option>
+          </select>
+          <button class="btn" onclick="loadLogs()">刷新</button>
+        </div>
+        <table>
+          <thead><tr><th>ID</th><th>专家</th><th>用户</th><th>消息</th><th>状态</th><th>Tokens</th><th>耗时</th><th>时间</th></tr></thead>
+          <tbody id="logs-tbody"></tbody>
+        </table>
+        <div class="toolbar" style="margin-top:14px">
+          <button class="btn small" id="logs-prev" onclick="logPage(-1)" disabled>上一页</button>
+          <span class="hint" id="logs-info"></span>
+          <button class="btn small" id="logs-next" onclick="logPage(1)">下一页</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ===================== Modal ===================== -->
+<div id="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div id="modal"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '/api';
+let TOKEN = localStorage.getItem('hermes_token') || '';
+let state = { experts: [], skills: [], mcps: [], logOffset: 0, logLimit: 50 };
+
+function toast(msg, isErr) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.className = 'toast', 2500);
+}
+
+async function api(path, method = 'GET', body) {
+  const opts = { method, headers: {} };
+  if (TOKEN) opts.headers['Authorization'] = 'Bearer ' + TOKEN;
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(API + path, opts);
+  if (res.status === 401) { doLogout(); throw new Error('未登录'); }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// ---------- 登录 ----------
+async function doLogin() {
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  if (!username || !password) return toast('请输入用户名和密码', true);
+  try {
+    const r = await api('/auth/login', 'POST', { username, password });
+    TOKEN = r.token;
+    localStorage.setItem('hermes_token', TOKEN);
+    showApp();
+    toast('登录成功');
+  } catch (e) { toast(e.message, true); }
+}
+function doLogout() {
+  TOKEN = ''; localStorage.removeItem('hermes_token');
+  document.getElementById('app-view').style.display = 'none';
+  document.getElementById('login-view').style.display = 'flex';
+}
+function showApp() {
+  document.getElementById('login-view').style.display = 'none';
+  document.getElementById('app-view').style.display = 'block';
+  document.getElementById('header-user').textContent = 'admin';
+  loadAll();
+}
+
+// ---------- Tabs ----------
+document.querySelectorAll('nav .tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('nav .tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('section-' + t.dataset.tab).classList.add('active');
+    if (t.dataset.tab === 'logs') loadLogs();
+    if (t.dataset.tab === 'settings') loadSettings();
+  };
+});
+
+async function loadAll() {
+  await Promise.all([loadExperts(), loadSkills(), loadMcps()]);
+}
+
+// ---------- 专家 ----------
+async function loadExperts() {
+  try {
+    state.experts = await api('/experts');
+    const tb = document.getElementById('experts-tbody');
+    if (!state.experts.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">暂无专家，点击右上角新建</td></tr>'; return; }
+    tb.innerHTML = state.experts.map(e => `
+      <tr>
+        <td>${e.id}</td>
+        <td><b>${esc(e.name)}</b></td>
+        <td class="mono">${esc(e.profile_name)}</td>
+        <td class="mono">${esc(e.model)}</td>
+        <td>${e.skills.map(s => `<span class="tag">${esc(s.name)}</span>`).join('') || '-'}</td>
+        <td>${e.mcp_servers.map(m => `<span class="tag">${esc(m.name)}</span>`).join('') || '-'}</td>
+        <td style="white-space:nowrap">
+          <button class="btn small" onclick="openExpertModal(${e.id})">编辑</button>
+          <button class="btn small" onclick="renderExpert(${e.id})">渲染下发</button>
+          <button class="btn small" onclick="viewExpertFiles(${e.id})">文件</button>
+          <button class="btn small danger" onclick="delExpert(${e.id})">删除</button>
+        </td>
+      </tr>`).join('');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function renderExpert(id) {
+  try {
+    const r = await api(`/experts/${id}/render`, 'POST');
+    const sync = r.sync || {};
+    toast(`渲染完成：${sync.status || 'ok'}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function viewExpertFiles(id) {
+  try {
+    const r = await api(`/experts/${id}/files`);
+    const files = r.files || [];
+    let html = `<div class="field full"><label>本地目录</label><div class="mono" style="margin-bottom:10px">${esc(r.local_dir || '')}</div></div>`;
+    html += files.map(f => `
+      <div class="field full" style="margin-bottom:12px">
+        <label class="mono">${esc(f.path)}</label>
+        <div class="pre">${esc(f.content)}</div>
+      </div>`).join('') || '<div class="empty">尚未下发（请先渲染）</div>';
+    openModalRaw('<h3>下发文件</h3>' + html);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function delExpert(id) {
+  if (!confirm('确认删除该专家？')) return;
+  try { await api(`/experts/${id}`, 'DELETE'); toast('已删除'); loadExperts(); }
+  catch (e) { toast(e.message, true); }
+}
+
+function openExpertModal(id) {
+  const e = id ? state.experts.find(x => x.id === id) : null;
+  let html = `<h3>${e ? '编辑专家' : '新建专家'}</h3><div class="form-grid">
+    <div class="field"><label>名称</label><input id="f-name" value="${e ? esc(e.name) : ''}"></div>
+    <div class="field"><label>Profile 名称（唯一）</label><input id="f-profile" value="${e ? esc(e.profile_name) : ''}"></div>
+    <div class="field"><label>模型</label><input id="f-model" value="${e ? esc(e.model) : 'deepseek-chat'}"></div>
+    <div class="field"><label>飞书 App ID（模式 B）</label><input id="f-appid" value="${e ? esc(e.feishu_app_id) : ''}"></div>
+    <div class="field"><label>飞书 App Secret（模式 B）</label><input id="f-appsecret" type="password" value="${e ? esc(e.feishu_app_secret) : ''}"></div>
+    <div class="field full"><label>系统提示词（System Prompt）</label>
+      <textarea id="f-prompt" class="tall">${e ? esc(e.system_prompt) : ''}</textarea></div>
+    <div class="field"><label>绑定 Skill</label><div class="checkbox-list" id="skill-checks">
+      ${state.skills.map(s => `<label><input type="checkbox" value="${s.id}" ${e && e.skill_ids.includes(s.id) ? 'checked' : ''}>${esc(s.name)}</label>`).join('') || '<span class="hint">暂无 Skill</span>'}
+    </div></div>
+    <div class="field"><label>绑定 MCP Server</label><div class="checkbox-list" id="mcp-checks">
+      ${state.mcps.map(m => `<label><input type="checkbox" value="${m.id}" ${e && e.mcp_server_ids.includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`).join('') || '<span class="hint">暂无 MCP</span>'}
+    </div></div>
+  </div>
+  <div class="modal-actions">
+    <button class="btn" onclick="closeModal()">取消</button>
+    <button class="btn primary" onclick="saveExpert(${e ? e.id : 'null'})">保存并渲染下发</button>
+  </div>`;
+  openModalRaw(html);
+}
+
+async function saveExpert(id) {
+  const body = {
+    name: val('f-name'), profile_name: val('f-profile'), model: val('f-model'),
+    system_prompt: val('f-prompt'), feishu_app_id: val('f-appid'), feishu_app_secret: val('f-appsecret'),
+    skill_ids: checkedVals('#skill-checks input'),
+    mcp_server_ids: checkedVals('#mcp-checks input'),
+  };
+  if (!body.name || !body.profile_name) return toast('名称和 Profile 名称为必填', true);
+  try {
+    const r = id ? await api(`/experts/${id}`, 'PUT', body) : await api('/experts', 'POST', body);
+    const sync = r.render && r.render.sync ? r.render.sync.status : 'ok';
+    toast(`已保存，profile 同步：${sync}`);
+    closeModal(); loadExperts();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- Skill ----------
+async function loadSkills() {
+  try {
+    state.skills = await api('/skills');
+    const tb = document.getElementById('skills-tbody');
+    if (!state.skills.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">暂无 Skill</td></tr>'; return; }
+    tb.innerHTML = state.skills.map(s => `
+      <tr>
+        <td>${s.id}</td><td><b>${esc(s.name)}</b></td><td>${esc(s.version)}</td><td>${esc(s.category) || '-'}</td>
+        <td>${esc(s.description) || '-'}</td>
+        <td>${(s.tags || '').split(',').filter(Boolean).map(t => `<span class="tag">${esc(t.trim())}</span>`).join('') || '-'}</td>
+        <td style="white-space:nowrap">
+          <button class="btn small" onclick="openSkillModal(${s.id})">编辑</button>
+          <button class="btn small danger" onclick="delSkill(${s.id})">删除</button>
+        </td>
+      </tr>`).join('');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function delSkill(id) {
+  if (!confirm('确认删除该 Skill？')) return;
+  try { await api(`/skills/${id}`, 'DELETE'); toast('已删除'); loadSkills(); }
+  catch (e) { toast(e.message, true); }
+}
+
+function openSkillModal(id) {
+  const s = id ? state.skills.find(x => x.id === id) : null;
+  openModalRaw(`<h3>${s ? '编辑 Skill' : '新建 Skill'}</h3><div class="form-grid">
+    <div class="field"><label>名称</label><input id="f-name" value="${s ? esc(s.name) : ''}"></div>
+    <div class="field"><label>版本</label><input id="f-version" value="${s ? esc(s.version) : '1.0.0'}"></div>
+    <div class="field"><label>分类</label><input id="f-category" value="${s ? esc(s.category) : ''}"></div>
+    <div class="field"><label>标签（逗号分隔）</label><input id="f-tags" value="${s ? esc(s.tags) : ''}"></div>
+    <div class="field full"><label>描述</label><input id="f-desc" value="${s ? esc(s.description) : ''}"></div>
+    <div class="field full"><label>内容（SKILL.md 正文）</label><textarea id="f-content" class="tall">${s ? esc(s.content) : ''}</textarea></div>
+  </div>
+  <div class="modal-actions">
+    <button class="btn" onclick="closeModal()">取消</button>
+    <button class="btn primary" onclick="saveSkill(${s ? s.id : 'null'})">保存</button>
+  </div>`);
+}
+
+async function saveSkill(id) {
+  const body = { name: val('f-name'), version: val('f-version'), category: val('f-category'),
+    tags: val('f-tags'), description: val('f-desc'), content: val('f-content') };
+  if (!body.name) return toast('名称为必填', true);
+  try {
+    const r = id ? await api(`/skills/${id}`, 'PUT', body) : await api('/skills', 'POST', body);
+    toast(`已保存${r.re_rendered_experts != null ? `，重渲染 ${r.re_rendered_experts} 个专家` : ''}`);
+    closeModal(); loadSkills();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- MCP ----------
+async function loadMcps() {
+  try {
+    state.mcps = await api('/mcp-servers');
+    const tb = document.getElementById('mcp-tbody');
+    if (!state.mcps.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">暂无 MCP Server</td></tr>'; return; }
+    tb.innerHTML = state.mcps.map(m => `
+      <tr>
+        <td>${m.id}</td><td><b>${esc(m.name)}</b></td><td><span class="tag">${esc(m.transport)}</span></td>
+        <td class="mono" style="max-width:280px;word-break:break-all">${esc(m.config_template)}</td>
+        <td class="mono">${esc(m.tools_filter)}</td>
+        <td style="white-space:nowrap">
+          <button class="btn small" onclick="openMcpModal(${m.id})">编辑</button>
+          <button class="btn small danger" onclick="delMcp(${m.id})">删除</button>
+        </td>
+      </tr>`).join('');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function delMcp(id) {
+  if (!confirm('确认删除该 MCP Server？')) return;
+  try { await api(`/mcp-servers/${id}`, 'DELETE'); toast('已删除'); loadMcps(); }
+  catch (e) { toast(e.message, true); }
+}
+
+function openMcpModal(id) {
+  const m = id ? state.mcps.find(x => x.id === id) : null;
+  openModalRaw(`<h3>${m ? '编辑 MCP Server' : '新建 MCP Server'}</h3><div class="form-grid">
+    <div class="field"><label>名称</label><input id="f-name" value="${m ? esc(m.name) : ''}"></div>
+    <div class="field"><label>传输方式</label>
+      <select id="f-transport"><option value="http" ${m && m.transport === 'http' ? 'selected' : ''}>http</option>
+      <option value="stdio" ${m && m.transport === 'stdio' ? 'selected' : ''}>stdio</option></select></div>
+    <div class="field full"><label>配置模板（JSON）</label>
+      <textarea id="f-config" class="tall mono">${m ? esc(m.config_template) : '{}'}</textarea>
+      <div class="hint">http 示例：{"url":"...","headers":{}}；stdio 示例：{"command":"npx","args":["-y","..."]}</div></div>
+    <div class="field full"><label>工具过滤（JSON 数组）</label><input id="f-filter" value="${m ? esc(m.tools_filter) : '[]'}"></div>
+  </div>
+  <div class="modal-actions">
+    <button class="btn" onclick="closeModal()">取消</button>
+    <button class="btn primary" onclick="saveMcp(${m ? m.id : 'null'})">保存</button>
+  </div>`);
+}
+
+async function saveMcp(id) {
+  const body = { name: val('f-name'), transport: val('f-transport'),
+    config_template: val('f-config'), tools_filter: val('f-filter') };
+  if (!body.name) return toast('名称为必填', true);
+  try { JSON.parse(body.config_template); JSON.parse(body.tools_filter); }
+  catch (e) { return toast('JSON 格式错误：' + e.message, true); }
+  try {
+    const r = id ? await api(`/mcp-servers/${id}`, 'PUT', body) : await api('/mcp-servers', 'POST', body);
+    toast(`已保存${r.re_rendered_experts != null ? `，重渲染 ${r.re_rendered_experts} 个专家` : ''}`);
+    closeModal(); loadMcps();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- 设置 ----------
+async function loadSettings() {
+  try {
+    const s = await api('/settings');
+    setVal('set-hermes-url', s.hermes_api_url);
+    setVal('set-hermes-key', s.hermes_api_key);
+    setVal('set-feishu-app-id', s.feishu_app_id);
+    setVal('set-feishu-app-secret', s.feishu_app_secret);
+    setVal('set-feishu-mode', s.feishu_mode || 'A');
+    setVal('set-deepseek-key', s.deepseek_api_key);
+    setVal('set-default-model', s.default_model);
+    updateFeishuModeUI();
+    refreshFeishuStatus();
+  } catch (e) { toast(e.message, true); }
+}
+
+function _settingsBody() {
+  return {
+    hermes_api_url: val('set-hermes-url'), hermes_api_key: val('set-hermes-key'),
+    feishu_app_id: val('set-feishu-app-id'), feishu_app_secret: val('set-feishu-app-secret'),
+    feishu_mode: val('set-feishu-mode'), deepseek_api_key: val('set-deepseek-key'),
+    default_model: val('set-default-model'),
+  };
+}
+
+async function saveSettings() {
+  try { await api('/settings', 'PUT', _settingsBody()); toast('设置已保存'); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function saveFeishuAndStart() {
+  try {
+    await api('/settings', 'PUT', _settingsBody());
+    toast('设置已保存，正在启动飞书连接…');
+    await feishuAction('start');
+  } catch (e) { toast(e.message, true); }
+}
+
+function updateFeishuModeUI() {
+  const mode = val('set-feishu-mode');
+  const title = document.getElementById('feishu-config-title');
+  const hint = document.getElementById('feishu-mode-hint');
+  const appidField = document.getElementById('f-field-appid');
+  const secretField = document.getElementById('f-field-appsecret');
+  if (mode === 'B') {
+    title.textContent = '飞书配置（模式 B：一专家一机器人）';
+    hint.innerHTML = '模式 B 下 <b>无需填写下方全局 App ID/Secret</b>：请到「专家管理」为每个专家分别填写其飞书 App ID / App Secret，保存后点「保存并启动连接」，平台会为每个专家各建立一条机器人长连接。';
+    appidField.style.opacity = '0.45';
+    secretField.style.opacity = '0.45';
+  } else {
+    title.textContent = '飞书配置（模式 A：单机器人路由）';
+    hint.innerHTML = '模式 A 使用 <b>单个机器人 + 消息路由</b>：填写全局 App ID / App Secret，用户给机器人发「专家」即可选择专家。';
+    appidField.style.opacity = '1';
+    secretField.style.opacity = '1';
+  }
+}
+
+async function testHermes() {
+  const el = document.getElementById('test-result');
+  el.textContent = '测试中…';
+  try {
+    const r = await api('/settings/test-hermes', 'POST', {
+      hermes_api_url: val('set-hermes-url'), hermes_api_key: val('set-hermes-key')
+    });
+    el.innerHTML = r.ok
+      ? `<span class="pill ok">✅ 连接成功（${r.status_code}）</span>`
+      : `<span class="pill err">❌ ${esc(r.detail || '失败')}</span>`;
+  } catch (e) { el.innerHTML = `<span class="pill err">❌ ${esc(e.message)}</span>`; }
+}
+
+async function refreshFeishuStatus() {
+  try {
+    const r = await api('/feishu/status');
+    const dot = document.getElementById('feishu-dot');
+    dot.className = 'status-dot ' + (r.running ? 'on' : 'off');
+    document.getElementById('feishu-status').textContent = r.running ? '运行中' : '已停止';
+    document.getElementById('feishu-bots').textContent = r.bots && r.bots.length
+      ? '活跃连接：' + r.bots.map(b => `app=${b.app_id}` + (b.expert_id ? `(专家#${b.expert_id})` : '(路由)')).join('；')
+      : '';
+  } catch (e) {}
+}
+
+async function feishuAction(action) {
+  try {
+    const r = await api('/feishu/' + action, 'POST');
+    toast(action === 'start' ? '已启动' : action === 'stop' ? '已停止' : '已重启');
+    refreshFeishuStatus();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- 日志 ----------
+async function loadLogs() {
+  try {
+    const status = document.getElementById('log-status').value;
+    const r = await api(`/call-logs?limit=${state.logLimit}&offset=${state.logOffset}${status ? '&status=' + status : ''}`);
+    const tb = document.getElementById('logs-tbody');
+    if (!r.items.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">暂无日志</td></tr>'; }
+    else {
+      tb.innerHTML = r.items.map(l => `
+        <tr>
+          <td>${l.id}</td><td>${esc(l.expert_name) || '-'}</td><td class="mono">${esc(l.user_open_id) || '-'}</td>
+          <td style="max-width:280px;word-break:break-all">${esc(l.message)}</td>
+          <td><span class="pill ${l.status === 'success' ? 'ok' : 'err'}">${l.status === 'success' ? '成功' : '失败'}</span></td>
+          <td>${l.tokens}</td><td>${l.latency_ms} ms</td><td class="mono">${esc((l.created_at || '').replace('T', ' ').slice(0, 19))}</td>
+        </tr>`).join('');
+    }
+    document.getElementById('logs-prev').disabled = state.logOffset === 0;
+    document.getElementById('logs-next').disabled = state.logOffset + state.logLimit >= r.total;
+    document.getElementById('logs-info').textContent = `第 ${Math.floor(state.logOffset/state.logLimit)+1} 页 · 共 ${r.total} 条`;
+  } catch (e) { toast(e.message, true); }
+}
+function logPage(d) { state.logOffset = Math.max(0, state.logOffset + d * state.logLimit); loadLogs(); }
+
+// ---------- 工具 ----------
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function val(id) { return document.getElementById(id).value; }
+function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v ?? ''; }
+function checkedVals(sel) { return [...document.querySelectorAll(sel + ':checked')].map(i => parseInt(i.value)); }
+function openModalRaw(html) {
+  document.getElementById('modal').innerHTML = html;
+  document.getElementById('modal-overlay').classList.add('open');
+}
+function closeModal() { document.getElementById('modal-overlay').classList.remove('open'); }
+
+document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+// 初始化
+if (TOKEN) {
+  api('/auth/me').then(() => showApp()).catch(() => { TOKEN=''; localStorage.removeItem('hermes_token'); });
+}
+</script>
+</body>
+</html>

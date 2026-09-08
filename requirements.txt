@@ -1,0 +1,10 @@
+fastapi>=0.140.0
+# starlette 1.x 需要 fastapi>=0.140（旧版 FastAPI 会把 on_startup 传给已移除该参数的 Router）
+uvicorn[standard]>=0.29.0
+sqlalchemy>=2.0.25
+pydantic>=2.6.0
+requests>=2.31.0
+# 适配 lark-oapi 1.7.x 的 register_p2_* 事件 API（1.7 之前接口名不同）
+lark-oapi>=1.7.0,<2.0.0
+pyyaml>=6.0
+python-multipart>=0.0.9

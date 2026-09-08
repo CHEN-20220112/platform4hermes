@@ -25,14 +25,10 @@
 
 ## 工作流
 
-1. 调用 `filesystem__list_directory`，path 填 output 目录，查找是否已有今日热点文件（文件名含今天日期，如 `hot_daily_YYYYMMDD.md`）
-2. 若已存在 → 调用 `filesystem__read_file` 读取内容，直接返回
-3. 若不存在：
-   a. 调用 `weibo__get_weibo_hot` 获取微博热搜 Top10
-   b. 调用 `weibo__get_zhihu_hot` 获取知乎热榜 Top10
-   c. 整理为 Markdown 格式（排名、标题、热度、摘要）
-   d. 调用 `filesystem__write_file`，path 填 `hot_daily_YYYYMMDD.md`，写入 output 目录
-   e. 返回热点内容摘要
+1. 调用 `web_search` 搜索今日热点新闻（关键词示例：「今日热点 微博热搜 知乎热榜 2026年9月8日」）
+2. 汇总多个来源，整理为 Markdown 格式（分类 + 排名 + 标题 + 热度 + 一句话摘要）
+3. 调用 `write_file` 写入 `output/hot_daily_YYYYMMDD.md`
+4. 返回热点内容摘要
 
 ---
 
@@ -42,27 +38,29 @@
 
 ## 前置：登录检查
 
-1. 调用 `xhs__check_login_status` 检查是否已登录
+1. 调用 `mcp__xhs__check_login_status` 检查是否已登录
 2. 若未登录：
-   a. 调用 `xhs__get_login_qrcode` 获取二维码
-   b. 告知用户：请用小红书 App 扫描二维码登录，扫完回复"已扫码"
-   c. 用户回复后，调用 `xhs__check_qrcode_status` 确认登录
+   a. 调用 `mcp__xhs__get_login_qrcode`，返回 JSON（含 `qr_url`、`qr_id`、`code`）
+   b. 用 qr_url 拼一个二维码图片链接发给用户（把 qr_url 做 URL 编码后填入 data 参数）：
+      `[点此打开登录二维码](https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=<urlencode(qr_url)>)`
+      并告知：请用小红书 App 扫描二维码登录，扫完回复"已扫码"
+   c. 用户回复后，调用 `mcp__xhs__check_qrcode_status`，参数填 qr_id 和 code，确认登录成功
    d. Cookie 会自动保存，后续免扫码
 
 ## 发文工作流
 
-1. 调用 `filesystem__list_directory` 查找今日热点文件（`hot_daily_YYYYMMDD.md`）
-2. 若不存在，先按 `fetch-today-hot` 流程生成
-3. 调用 `filesystem__read_file` 读取热点内容
+1. 调用 `search_files` 查找今日热点文件（`hot_daily_YYYYMMDD.md`）
+2. 若不存在，先按「今日热点获取」流程（用 web_search 搜集热点）生成
+3. 调用 `read_file` 读取热点内容
 4. 基于热点撰写小红书文案：
    - 标题：选 1-3 条最热话题，组合成吸睛标题（≤20 字）
    - 正文：口语化、有情绪、带 emoji，500-800 字，分点罗列热点
    - 标签：3-5 个相关话题标签（如 #热搜 #今日热点 #社会新闻）
-5. 把文案草稿保存到 `output/xhs_draft_YYYYMMDD.md`（调用 `filesystem__write_file`）
+5. 把文案草稿保存到 `output/xhs_draft_YYYYMMDD.md`（调用 `write_file`）
 6. 准备封面图：
    - 询问用户是否已有图片，或提供图片路径
    - 若用户无图，告知必须至少 1 张图才能发布
-7. 调用 `xhs__publish_content`：
+7. 调用 `mcp__xhs__publish_content`：
    - title：标题
    - content：正文
    - images：图片路径列表（至少 1 张）

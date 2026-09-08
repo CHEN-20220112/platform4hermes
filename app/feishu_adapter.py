@@ -46,6 +46,44 @@ except Exception as exc:  # noqa: BLE001
     lark = None
 
 
+def _patch_lark_ws_loop():
+    """lark-oapi 的 ``ws.Client`` 在模块级共享一个 ``loop``，同一进程只能跑一个长连接。
+
+    这里用一个「线程本地 loop 代理」替换模块级 ``loop``：每个线程第一次访问时创建
+    自己的 event loop，之后该线程里所有 ``loop.xxx`` 都落到自己的 loop 上，从而让
+    多个 ``ws.Client``（模式 B 多专家）能并发运行。
+    """
+    if not LARK_AVAILABLE:
+        return
+    import lark_oapi.ws.client as _ws_module
+
+    if getattr(_ws_module, "_hermes_loop_patched", False):
+        return
+
+    _thread_loops: dict = {}
+    _lock = threading.Lock()
+
+    class _LoopProxy:
+        def _get(self):
+            tid = threading.get_ident()
+            with _lock:
+                loop = _thread_loops.get(tid)
+                if loop is None:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    _thread_loops[tid] = loop
+                return loop
+
+        def __getattr__(self, name):
+            return getattr(self._get(), name)
+
+    _ws_module.loop = _LoopProxy()
+    _ws_module._hermes_loop_patched = True
+
+
+_patch_lark_ws_loop()
+
+
 # ---------------------------------------------------------------------------
 # 进度事件 → 卡片文案
 # ---------------------------------------------------------------------------
@@ -116,17 +154,7 @@ class _FeishuBot:
         logger.info("飞书 bot 已启动 app_id=%s expert_id=%s", self.app_id, self.expert_id)
 
     def _run_ws(self):
-        """在独立线程里跑 ws.Client，并给每个 client 分配独立 event loop。
-
-        lark-oapi 的 ``ws.Client`` 在模块级共享一个 ``loop``，默认同一进程只能
-        跑一个长连接；多专家（模式 B）需要每个 client 一个 loop，这里替换模块级
-        ``loop`` 变量来实现。
-        """
-        import lark_oapi.ws.client as _ws_module
-
-        new_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(new_loop)
-        _ws_module.loop = new_loop
+        """在独立线程里跑 ws.Client（loop 已由 _patch_lark_ws_loop 按线程本地代理）。"""
         try:
             self._client.start()
         except Exception as exc:  # noqa: BLE001

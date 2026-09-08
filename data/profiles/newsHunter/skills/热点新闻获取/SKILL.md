@@ -10,11 +10,7 @@ tags: []
 
 ## 工作流
 
-1. 调用 `filesystem__list_directory`，path 填 output 目录，查找是否已有今日热点文件（文件名含今天日期，如 `hot_daily_YYYYMMDD.md`）
-2. 若已存在 → 调用 `filesystem__read_file` 读取内容，直接返回
-3. 若不存在：
-   a. 调用 `weibo__get_weibo_hot` 获取微博热搜 Top10
-   b. 调用 `weibo__get_zhihu_hot` 获取知乎热榜 Top10
-   c. 整理为 Markdown 格式（排名、标题、热度、摘要）
-   d. 调用 `filesystem__write_file`，path 填 `hot_daily_YYYYMMDD.md`，写入 output 目录
-   e. 返回热点内容摘要
+1. 调用 `web_search` 搜索今日热点新闻（关键词示例：「今日热点 微博热搜 知乎热榜 2026年9月8日」）
+2. 汇总多个来源，整理为 Markdown 格式（分类 + 排名 + 标题 + 热度 + 一句话摘要）
+3. 调用 `write_file` 写入 `output/hot_daily_YYYYMMDD.md`
+4. 返回热点内容摘要

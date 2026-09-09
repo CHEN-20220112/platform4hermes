@@ -16,7 +16,7 @@ d:\platform4hermes\
 ├── app\
 │   ├── main.py              # FastAPI 入口 + startup（init_db + seed + 飞书自动启动）
 │   ├── database.py          # SQLAlchemy engine + SessionLocal + Base
-│   ├── models.py            # 7 张表 + 2 张多对多关联表
+│   ├── models.py            # 8 张表 + 2 张多对多关联表
 │   ├── settings_store.py    # DEFAULTS + get/update settings
 │   ├── schemas.py           # Pydantic 请求模型
 │   ├── services.py          # ProfileRenderer + HermesExecutor
@@ -57,8 +57,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - **Profile 下发**：创建/编辑专家时自动渲染到 `data/profiles/{profile_name}/`，
   并同步到 `~/.hermes/profiles/{profile_name}/`（目录不存在时先执行
   `hermes profile create {name}`；Hermes 未安装则静默跳过）。
-- **会话隔离**：`session_id = "{open_id}_{expert_id}"`，由 Hermes 按 session 隔离上下文，
-  同一用户在不同专家下对话历史互相独立。
+- **会话隔离**：每个「用户 × 专家」可开多个会话，落在 `conversations` 表；每次
+  「新对话 / 重置」都生成新的 `session_key`（即 Hermes 的 `X-Hermes-Session-Id`），
+  换 session 即清空上下文，不同会话历史互相独立。
+- **飞书会话命令**（模式 A / B 均支持）：`新对话`（开新会话）、`重置`（清空当前
+  会话上下文）、`会话`（列出/切换/删除会话）；`专家`/`菜单` 打开菜单卡片（含快捷按钮）。
 - **飞书模式**：
   - 模式 A（单机器人路由）：平台设置里配置全局 App ID/Secret；用户发「专家」选专家。
   - 模式 B（一专家一机器人）：每个专家的 `feishu_app_id`/`feishu_app_secret` 独立配置。

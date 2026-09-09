@@ -105,6 +105,17 @@
   .toast.err { background: var(--danger); }
 
   .empty { color: var(--muted); text-align: center; padding: 30px 0; }
+
+  /* MCP 同步等待遮罩 */
+  #sync-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 300;
+                  display: flex; align-items: center; justify-content: center; }
+  .sync-box { background: #fff; border-radius: 12px; padding: 30px 36px; min-width: 320px;
+              text-align: center; box-shadow: 0 12px 40px rgba(0,0,0,.18); }
+  .spinner { width: 34px; height: 34px; margin: 0 auto 16px; border: 3px solid #e3e6ea;
+             border-top-color: var(--primary); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .sync-msg { color: var(--text); font-size: 14px; margin-bottom: 6px; }
+  .sync-sub { color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -313,6 +324,53 @@ async function api(path, method = 'GET', body) {
   return res.json();
 }
 
+// ---------- MCP 同步等待遮罩 / 轮询 ----------
+let _syncOverlay = null;
+function showSyncOverlay(msg) {
+  hideSyncOverlay();
+  const el = document.createElement('div');
+  el.id = 'sync-overlay';
+  el.innerHTML = '<div class="sync-box"><div class="spinner"></div>' +
+    '<div class="sync-msg">' + msg + '</div>' +
+    '<div class="sync-sub">正在执行 hermes mcp add，请稍候…</div></div>';
+  document.body.appendChild(el);
+  _syncOverlay = el;
+}
+function hideSyncOverlay() {
+  if (_syncOverlay) { _syncOverlay.remove(); _syncOverlay = null; }
+}
+function updateSyncOverlay(msg) {
+  const m = _syncOverlay && _syncOverlay.querySelector('.sync-msg');
+  if (m) m.textContent = msg;
+}
+async function waitMcpSync(expertId, timeoutMs) {
+  timeoutMs = timeoutMs || 180000;
+  const start = Date.now();
+  let last = null;
+  while (Date.now() - start < timeoutMs) {
+    try {
+      last = await api('/experts/' + expertId + '/mcp-sync-status');
+      if (last.status === 'done') return { ok: true, results: last.results || [] };
+      if (last.status === 'error') return { ok: false, results: last.results || [] };
+      if (last.status === 'idle') return { ok: true, results: [], skipped: true };
+      const n = (last.results || []).length;
+      updateSyncOverlay('正在注册 MCP（' + n + '/' + (last.total || 0) + '）…');
+    } catch (e) { /* 轮询失败忽略，继续 */ }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  return { ok: false, results: last ? (last.results || []) : [], timeout: true };
+}
+function toastMcpResults(res) {
+  if (res.skipped) return;
+  if (!res.results || !res.results.length) { toast('MCP 注册结果未知', true); return; }
+  const bad = res.results.filter(r => r.status !== 'ok');
+  if (bad.length) {
+    toast('MCP 注册失败：' + bad.map(r => r.name + '(' + (r.reason || r.detail || '失败') + ')').join('；'), true);
+  } else {
+    toast('MCP 注册完成（' + res.results.length + ' 个）');
+  }
+}
+
 // ---------- 登录 ----------
 async function doLogin() {
   const username = document.getElementById('login-username').value.trim();
@@ -379,11 +437,20 @@ async function loadExperts() {
 }
 
 async function renderExpert(id) {
+  showSyncOverlay('正在渲染并下发配置…');
   try {
     const r = await api(`/experts/${id}/render`, 'POST');
     const sync = r.sync || {};
-    toast(`渲染完成：${sync.status || 'ok'}`);
-  } catch (e) { toast(e.message, true); }
+    if (sync.status === 'synced' && sync.mcp) {
+      updateSyncOverlay('正在注册 MCP…');
+      const s = await waitMcpSync(id);
+      hideSyncOverlay();
+      toastMcpResults(s);
+    } else {
+      hideSyncOverlay();
+      toast(`渲染完成：${sync.status || 'ok'}`);
+    }
+  } catch (e) { hideSyncOverlay(); toast(e.message, true); }
 }
 
 async function viewExpertFiles(id) {
@@ -438,12 +505,23 @@ async function saveExpert(id) {
     mcp_server_ids: checkedVals('#mcp-checks input'),
   };
   if (!body.name || !body.profile_name) return toast('名称和 Profile 名称为必填', true);
+  showSyncOverlay('正在保存专家并下发配置…');
   try {
     const r = id ? await api(`/experts/${id}`, 'PUT', body) : await api('/experts', 'POST', body);
-    const sync = r.render && r.render.sync ? r.render.sync.status : 'ok';
-    toast(`已保存，profile 同步：${sync}`);
-    closeModal(); loadExperts();
-  } catch (e) { toast(e.message, true); }
+    const expertId = r.expert ? r.expert.id : id;
+    const sync = r.render && r.render.sync;
+    closeModal();
+    if (sync && sync.status === 'synced' && sync.mcp) {
+      updateSyncOverlay('正在注册 MCP…');
+      const s = await waitMcpSync(expertId);
+      hideSyncOverlay();
+      toastMcpResults(s);
+    } else {
+      hideSyncOverlay();
+      toast(`已保存，profile 同步：${(sync && sync.status) || 'ok'}`);
+    }
+    loadExperts();
+  } catch (e) { hideSyncOverlay(); toast(e.message, true); }
 }
 
 // ---------- Skill ----------

@@ -11,7 +11,9 @@
 import asyncio
 import json
 import logging
+import re
 import threading
+import uuid
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -101,10 +103,13 @@ def _progress_detail(evt: dict) -> str:
     return ""
 
 
-def _truncate(text: str, limit: int = 4000) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "\n\n…（内容过长已截断）"
+# 飞书会话命令关键词（英文统一小写后比对）
+# 注意：只保留「明确动作词」，避免「你好 / hi / 列表」等日常用语被误判成命令。
+_MENU_KEYWORDS = {"菜单", "帮助", "help"}
+_SELECT_KEYWORDS = {"专家", "选择专家"}  # 仅模式 A 用于选专家
+_NEW_KEYWORDS = {"新对话", "新会话", "new", "开始新对话"}
+_RESET_KEYWORDS = {"重置", "重置对话", "清空对话", "reset"}
+_LIST_KEYWORDS = {"会话", "会话列表", "对话", "对话列表"}
 
 
 class _FeishuBot:
@@ -398,6 +403,7 @@ class FeishuAdapter:
     def __init__(self):
         self._bots: dict = {}
         self._selection: dict = {}  # open_id -> expert_id（模式 A）
+        self._active_conv: dict = {}  # open_id -> conversation_id（当前会话）
         self._lock = threading.RLock()
         self._running = False
         self._processed_messages: set = set()  # 已处理 message_id（去重）
@@ -516,41 +522,210 @@ class FeishuAdapter:
     def _list_experts(self, db: Session):
         return db.query(models.Expert).order_by(models.Expert.id).all()
 
+    # ------------------------------------------------------------------
+    # 会话管理
+    # ------------------------------------------------------------------
+    def _resolve_expert(self, db, open_id):
+        with self._lock:
+            expert_id = self._selection.get(open_id)
+            cid = self._active_conv.get(open_id) if not expert_id else None
+        if not expert_id and cid:
+            conv = db.get(models.Conversation, cid)
+            expert_id = conv.expert_id if conv else None
+        return db.get(models.Expert, expert_id) if expert_id else None
+
+    def _get_active_conv(self, db, open_id, expert_id=None):
+        with self._lock:
+            cid = self._active_conv.get(open_id)
+        if cid:
+            conv = db.get(models.Conversation, cid)
+            if conv is not None and conv.open_id == open_id and (
+                expert_id is None or conv.expert_id == expert_id
+            ):
+                return conv
+        return None
+
+    def _latest_conv(self, db, open_id, expert_id=None):
+        q = db.query(models.Conversation).filter(models.Conversation.open_id == open_id)
+        if expert_id is not None:
+            q = q.filter(models.Conversation.expert_id == expert_id)
+        return q.order_by(models.Conversation.updated_at.desc()).first()
+
+    def _list_conversations(self, db, open_id):
+        return (
+            db.query(models.Conversation)
+            .filter(models.Conversation.open_id == open_id)
+            .order_by(models.Conversation.updated_at.desc())
+            .all()
+        )
+
+    def _ensure_conversation(self, db, open_id, expert_id):
+        conv = self._get_active_conv(db, open_id, expert_id) or self._latest_conv(db, open_id, expert_id)
+        if conv is None:
+            conv = self._new_conversation(db, open_id, expert_id)
+        else:
+            with self._lock:
+                self._active_conv[open_id] = conv.id
+                self._selection[open_id] = expert_id
+        return conv
+
+    def _new_conversation(self, db, open_id, expert_id, title=""):
+        conv = models.Conversation(
+            open_id=open_id,
+            expert_id=expert_id,
+            session_key=uuid.uuid4().hex,
+            title=title or "新对话",
+        )
+        db.add(conv)
+        db.commit()
+        db.refresh(conv)
+        with self._lock:
+            self._active_conv[open_id] = conv.id
+            self._selection[open_id] = expert_id
+        return conv
+
+    def _reset_conversation(self, db, conv):
+        """重置 = 换新 session_key，Hermes 端即视为全新上下文。"""
+        conv.session_key = uuid.uuid4().hex
+        db.commit()
+        db.refresh(conv)
+        return conv
+
+    def _delete_conversation(self, db, open_id, conv):
+        db.delete(conv)
+        db.commit()
+        with self._lock:
+            if self._active_conv.get(open_id) == conv.id:
+                self._active_conv.pop(open_id, None)
+        return True
+
+    def _cmd_new(self, db, bot, open_id, message_id, bot_expert_id=None):
+        if bot_expert_id is not None:
+            expert = db.get(models.Expert, bot_expert_id)
+        else:
+            expert = self._resolve_expert(db, open_id)
+        if expert is None:
+            self._send_select_card(db, bot, open_id, message_id)
+            return
+        conv = self._new_conversation(db, open_id, expert.id)
+        self._reply_text(
+            bot, message_id,
+            f"已开启与「{expert.name}」的新对话（{conv.id}）。"
+            f"发送「重置」清空，「会话」查看/切换/删除。",
+        )
+
+    def _cmd_reset(self, db, bot, open_id, message_id, bot_expert_id=None):
+        with self._lock:
+            sel = self._selection.get(open_id)
+        expert_id = bot_expert_id if bot_expert_id is not None else sel
+        conv = self._get_active_conv(db, open_id, expert_id) or self._latest_conv(db, open_id, expert_id)
+        if conv is None:
+            self._reply_text(bot, message_id, "当前还没有对话，直接发送任务即可开始。")
+            return
+        self._reset_conversation(db, conv)
+        expert = db.get(models.Expert, conv.expert_id)
+        name = expert.name if expert else str(conv.expert_id)
+        self._reply_text(bot, message_id, f"已重置与「{name}」的对话（{conv.id}），上下文已清空。")
+
+    def _handle_conversation_text(self, db, bot, open_id, text, message_id) -> bool:
+        """文字指令兜底：切换/重置/删除指定会话（不依赖卡片按钮）。返回是否已处理。"""
+        t = text.strip()
+        m = re.match(r"^(切换|切换到|进入)\s*(\d+)\s*$", t)
+        if m:
+            cid = int(m.group(2))
+            conv = db.get(models.Conversation, cid)
+            if conv is None or conv.open_id != open_id:
+                self._reply_text(bot, message_id, f"会话 {cid} 不存在，发「会话」查看列表")
+                return True
+            with self._lock:
+                self._active_conv[open_id] = conv.id
+                self._selection[open_id] = conv.expert_id
+            self._reply_text(bot, message_id, f"已切换到会话 {conv.id}")
+            return True
+
+        m = re.match(r"^(删除|删|删除会话)\s*(\d+)\s*$", t)
+        if m:
+            cid = int(m.group(2))
+            conv = db.get(models.Conversation, cid)
+            if conv is None or conv.open_id != open_id:
+                self._reply_text(bot, message_id, f"会话 {cid} 不存在，发「会话」查看列表")
+                return True
+            self._delete_conversation(db, open_id, conv)
+            self._reply_text(bot, message_id, f"已删除会话 {cid}")
+            return True
+
+        m = re.match(r"^(重置|清空)\s*(\d+)\s*$", t)
+        if m:
+            cid = int(m.group(2))
+            conv = db.get(models.Conversation, cid)
+            if conv is None or conv.open_id != open_id:
+                self._reply_text(bot, message_id, f"会话 {cid} 不存在，发「会话」查看列表")
+                return True
+            self._reset_conversation(db, conv)
+            self._reply_text(bot, message_id, f"已重置会话 {cid}")
+            return True
+
+        if t in ("删除", "删", "切换", "进入"):
+            self._reply_text(bot, message_id, "用法：发「会话」查看列表，再发「切换 3」「删除 3」「重置 3」操作对应会话")
+            return True
+        return False
+
     def handle_message(self, open_id, text, message_id, bot_expert_id=None, bot=None):
         db = self._db()
         try:
-            # 模式 B：固定专家
+            lowered = text.strip().lower()
+
+            # 通用会话命令（模式 A / B 都支持）
+            if lowered in _MENU_KEYWORDS or (
+                bot_expert_id is None and lowered in _SELECT_KEYWORDS
+            ):
+                self._send_menu_card(db, bot, open_id, message_id, bot_expert_id)
+                return
+            if lowered in _NEW_KEYWORDS:
+                self._cmd_new(db, bot, open_id, message_id, bot_expert_id)
+                return
+            if lowered in _RESET_KEYWORDS:
+                self._cmd_reset(db, bot, open_id, message_id, bot_expert_id)
+                return
+            if lowered in _LIST_KEYWORDS:
+                self._send_conversation_card(db, bot, open_id, message_id)
+                return
+
+            # 文字指令兜底：切换/删除/重置指定会话（不依赖卡片按钮）
+            if self._handle_conversation_text(db, bot, open_id, text, message_id):
+                return
+
+            # 模式 B：固定专家，其余消息一律当作任务
             if bot_expert_id is not None:
                 expert = db.get(models.Expert, bot_expert_id)
                 if expert is None:
                     self._reply_text(bot, message_id, "专家不存在")
                     return
-                self._run_task(db, bot, expert, text, open_id, message_id)
+                conv = self._ensure_conversation(db, open_id, bot_expert_id)
+                self._run_task(db, bot, expert, text, open_id, message_id, conv)
                 return
 
-            # 模式 A：路由
-            lowered = text.strip().lower()
-            if lowered in ("专家", "选择专家", "菜单", "列表", "help", "帮助", "hi", "你好"):
-                self._send_select_card(db, bot, open_id, message_id)
-                return
-
+            # 模式 A：数字 = 选择专家（恢复/新建该专家的会话）
             if text.strip().isdigit():
                 idx = int(text.strip())
                 experts = self._list_experts(db)
                 if 1 <= idx <= len(experts):
                     expert = experts[idx - 1]
-                    with self._lock:
-                        self._selection[open_id] = expert.id
-                    self._reply_text(bot, message_id, f"已选择专家：{expert.name}")
+                    conv = self._ensure_conversation(db, open_id, expert.id)
+                    self._reply_text(
+                        bot, message_id,
+                        f"已选择专家：{expert.name}（会话 {conv.id}）。"
+                        f"发送「新对话」开新会话，「重置」清空上下文，「会话」查看列表。",
+                    )
                     return
 
-            with self._lock:
-                expert_id = self._selection.get(open_id)
-            expert = db.get(models.Expert, expert_id) if expert_id else None
+            # 模式 A：普通消息 → 当前专家 + 当前会话
+            expert = self._resolve_expert(db, open_id)
             if expert is None:
                 self._send_select_card(db, bot, open_id, message_id)
                 return
-            self._run_task(db, bot, expert, text, open_id, message_id)
+            conv = self._ensure_conversation(db, open_id, expert.id)
+            self._run_task(db, bot, expert, text, open_id, message_id, conv)
         finally:
             db.close()
 
@@ -565,18 +740,77 @@ class FeishuAdapter:
         value = value or {}
 
         action = value.get("action")
-        if action == "select_expert":
-            expert_id = value.get("expert_id")
-            name = "未知专家"
-            db = self._db()
-            try:
-                expert = db.get(models.Expert, expert_id)
-                name = expert.name if expert else "未知专家"
+        db = self._db()
+        try:
+            if action == "select_expert":
+                try:
+                    expert_id = int(value.get("expert_id"))
+                except (TypeError, ValueError):
+                    expert_id = None
+                expert = db.get(models.Expert, expert_id) if expert_id else None
+                if expert is None:
+                    return self._toast("专家不存在")
+                conv = self._ensure_conversation(db, open_id, expert.id)
+                return self._toast(f"已选择专家：{expert.name}（会话 {conv.id}）")
+
+            if action == "new_conversation":
+                expert = self._resolve_expert(db, open_id)
+                if expert is None and bot is not None and getattr(bot, "expert_id", None) is not None:
+                    # 模式 B：专家由机器人固定，无需先选择
+                    expert = db.get(models.Expert, bot.expert_id)
+                if expert is None:
+                    self._send_select_card(db, bot, open_id, message_id)
+                    return self._toast("请先选择专家")
+                conv = self._new_conversation(db, open_id, expert.id)
+                return self._toast(f"已开启新对话（{conv.id}）")
+
+            if action == "reset_conversation":
+                cid = value.get("conversation_id")
+                conv = None
+                if cid is not None:
+                    try:
+                        conv = db.get(models.Conversation, int(cid))
+                    except (TypeError, ValueError):
+                        conv = None
+                    if conv is not None and conv.open_id != open_id:
+                        conv = None
+                else:
+                    conv = self._get_active_conv(db, open_id) or self._latest_conv(db, open_id)
+                if conv is None:
+                    return self._toast("没有可重置的会话")
+                self._reset_conversation(db, conv)
+                return self._toast(f"会话 {conv.id} 已重置")
+
+            if action == "list_conversations":
+                self._send_conversation_card(db, bot, open_id, message_id)
+                return self._toast("已显示会话列表")
+
+            if action == "switch_conversation":
+                try:
+                    cid = int(value.get("conversation_id"))
+                except (TypeError, ValueError):
+                    cid = None
+                conv = db.get(models.Conversation, cid) if cid else None
+                if conv is None or conv.open_id != open_id:
+                    return self._toast("会话不存在")
                 with self._lock:
-                    self._selection[open_id] = int(expert_id)
-            finally:
-                db.close()
-            return self._toast(f"已选择专家：{name}，现在可直接发送任务")
+                    self._active_conv[open_id] = conv.id
+                    self._selection[open_id] = conv.expert_id
+                return self._toast(f"已切换到会话 {conv.id}")
+
+            if action == "delete_conversation":
+                try:
+                    cid = int(value.get("conversation_id"))
+                except (TypeError, ValueError):
+                    cid = None
+                conv = db.get(models.Conversation, cid) if cid else None
+                if conv is None or conv.open_id != open_id:
+                    return self._toast("会话不存在")
+                self._delete_conversation(db, open_id, conv)
+                self._send_conversation_card(db, bot, open_id, message_id)
+                return self._toast(f"已删除会话 {conv.id}")
+        finally:
+            db.close()
         return self._toast("操作成功")
 
     @staticmethod
@@ -594,8 +828,16 @@ class FeishuAdapter:
     # ------------------------------------------------------------------
     # 执行任务 + 进度卡片
     # ------------------------------------------------------------------
-    def _run_task(self, db, bot, expert, text, open_id, message_id):
-        logger.info("开始处理任务 expert=%s open_id=%s text=%s", expert.name, open_id, text[:50])
+    def _run_task(self, db, bot, expert, text, open_id, message_id, conv=None):
+        if conv is None:
+            conv = self._ensure_conversation(db, open_id, expert.id)
+        # 会话标题：首条消息摘要（仅当尚未设置）
+        if not (conv.title or "").strip() or conv.title == "新对话":
+            conv.title = text[:50]
+            db.commit()
+
+        logger.info("开始处理任务 expert=%s open_id=%s conv=%s text=%s",
+                    expert.name, open_id, conv.id, text[:50])
         # 1. 发送「思考中」进度卡片，拿到 card 的 message_id
         card_msg_id = bot.reply_card(
             message_id, self._progress_card("🤔 思考中…", "")
@@ -610,11 +852,13 @@ class FeishuAdapter:
             if detail:
                 bot.patch_card(card_msg_id, self._progress_card("⚙️ 处理中…", detail))
 
-        # 3. 调 HermesExecutor
+        # 3. 调 HermesExecutor（携带会话 session_key）
         try:
             with HermesExecutor(db) as executor:
                 result = executor.run(
-                    expert, text, open_id=open_id, channel="feishu", on_progress=on_progress
+                    expert, text, open_id=open_id, channel="feishu",
+                    session_id=conv.session_key,
+                    on_progress=on_progress,
                 )
             logger.info(
                 "HermesExecutor 返回 latency_ms=%s tokens=%s error=%s",
@@ -625,7 +869,7 @@ class FeishuAdapter:
             result = {"response": f"执行异常: {exc}", "tool_calls": [], "tokens": 0, "latency_ms": 0, "error": str(exc)}
 
         # 4. 终态卡片
-        final = self._final_card(expert, result)
+        final = self._final_card(expert, result, conv.id)
         if card_msg_id:
             bot.patch_card(card_msg_id, final)
         else:
@@ -651,19 +895,19 @@ class FeishuAdapter:
             "body": {"elements": elements},
         }
 
-    def _final_card(self, expert, result: dict) -> dict:
+    def _final_card(self, expert, result: dict, conversation_id=None) -> dict:
         response = result.get("response") or ""
         tool_calls = result.get("tool_calls") or []
-        lines = [f"**{expert.name}** 已完成任务\n", "---", "**回复**\n", _truncate(response)]
+        lines = [f"**{expert.name}** 已完成任务\n", "---", "**回复**\n", response]
         if tool_calls:
             lines += ["\n---", "**工具调用链路**"]
             for i, tc in enumerate(tool_calls, 1):
                 name = tc.get("name") or tc.get("tool") or tc.get("tool_name") or "?"
                 lines.append(f"{i}. {name}")
-        lines += [
-            "\n---",
-            f"⏱️ {result.get('latency_ms', 0)} ms · tokens {result.get('tokens', 0)}",
-        ]
+        footer = f"⏱️ {result.get('latency_ms', 0)} ms · tokens {result.get('tokens', 0)}"
+        if conversation_id is not None:
+            footer += f" · 会话 {conversation_id}"
+        lines += ["\n---", footer]
         return {
             "schema": "2.0",
             "config": {"update_multi": True, "width_mode": "fill"},
@@ -674,34 +918,116 @@ class FeishuAdapter:
             "body": {"elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}]},
         }
 
-    def _select_card(self, experts) -> dict:
-        actions = []
-        for i, e in enumerate(experts, 1):
-            actions.append(
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": f"{i}. {e.name}"},
-                    "value": {"action": "select_expert", "expert_id": e.id},
-                    "type": "primary",
-                }
-            )
-        elements = [
-            {"tag": "div", "text": {"tag": "lark_md", "content": "**请选择专家**（点按钮或回复数字）："}},
-            {"tag": "action", "actions": actions},
-        ]
+    def _menu_card(self, experts, fixed_expert_name=None) -> dict:
+        elements = []
+        if fixed_expert_name:
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"当前专家：**{fixed_expert_name}**"},
+            })
+            elements.append({"tag": "hr"})
+        else:
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": "**请选择专家**（点按钮或回复数字，自动恢复/新建该专家的会话）："},
+            })
+            actions = []
+            for i, e in enumerate(experts, 1):
+                actions.append(
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": f"{i}. {e.name}"},
+                        "value": {"action": "select_expert", "expert_id": e.id},
+                        "type": "primary",
+                    }
+                )
+            elements.append({"tag": "action", "actions": actions})
+            elements.append({"tag": "hr"})
+
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "**会话操作**"},
+        })
+        elements.append({
+            "tag": "action",
+            "actions": [
+                {"tag": "button", "text": {"tag": "plain_text", "content": "🆕 新对话"},
+                 "value": {"action": "new_conversation"}, "type": "primary"},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "📋 会话列表"},
+                 "value": {"action": "list_conversations"}, "type": "default"},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "🔄 重置当前对话"},
+                 "value": {"action": "reset_conversation"}, "type": "default"},
+            ],
+        })
         return {
             "schema": "2.0",
             "config": {"update_multi": True, "width_mode": "fill"},
-            "header": {"title": {"tag": "plain_text", "content": "专家列表"}, "template": "wathet"},
+            "header": {"title": {"tag": "plain_text", "content": "Hermes 助手"}, "template": "wathet"},
             "body": {"elements": elements},
         }
 
-    def _send_select_card(self, db, bot, open_id, message_id):
+    def _send_menu_card(self, db, bot, open_id, message_id, bot_expert_id=None):
+        if bot_expert_id is not None:
+            expert = db.get(models.Expert, bot_expert_id)
+            if expert is None:
+                self._reply_text(bot, message_id, "专家不存在")
+                return
+            bot.reply_card(message_id, self._menu_card([], fixed_expert_name=expert.name))
+            return
         experts = self._list_experts(db)
         if not experts:
             self._reply_text(bot, message_id, "暂无可用专家，请先在平台创建专家。")
             return
-        bot.reply_card(message_id, self._select_card(experts))
+        bot.reply_card(message_id, self._menu_card(experts))
+
+    def _send_select_card(self, db, bot, open_id, message_id):
+        """无专家可选时引导选择（等价于打开菜单）。"""
+        self._send_menu_card(db, bot, open_id, message_id, bot_expert_id=None)
+
+    def _conversation_card(self, convs, expert_names) -> dict:
+        elements = []
+        for c in convs:
+            name = expert_names.get(c.expert_id, f"专家{c.expert_id}")
+            title = (c.title or "（无标题）")[:40]
+            updated = c.updated_at.strftime("%m-%d %H:%M") if c.updated_at else ""
+            elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"**会话 {c.id} · {name}**\n{title}"},
+            })
+            elements.append({
+                "tag": "action",
+                "actions": [
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "切换"},
+                     "value": {"action": "switch_conversation", "conversation_id": c.id},
+                     "type": "primary"},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "重置"},
+                     "value": {"action": "reset_conversation", "conversation_id": c.id},
+                     "type": "default"},
+                    {"tag": "button", "text": {"tag": "plain_text", "content": "删除"},
+                     "value": {"action": "delete_conversation", "conversation_id": c.id},
+                     "type": "danger"},
+                ],
+            })
+            if updated:
+                elements.append({
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"更新于 {updated}"},
+                })
+            elements.append({"tag": "hr"})
+        return {
+            "schema": "2.0",
+            "config": {"update_multi": True, "width_mode": "fill"},
+            "header": {"title": {"tag": "plain_text", "content": "会话列表"}, "template": "wathet"},
+            "body": {"elements": elements},
+        }
+
+    def _send_conversation_card(self, db, bot, open_id, message_id):
+        convs = self._list_conversations(db, open_id)
+        if not convs:
+            self._reply_text(bot, message_id, "你还没有任何对话，直接发送任务即可开始。")
+            return
+        expert_names = {e.id: e.name for e in db.query(models.Expert).all()}
+        bot.reply_card(message_id, self._conversation_card(convs, expert_names))
 
     def _reply_text(self, bot, message_id, text):
         if bot is not None:

@@ -1,0 +1,6 @@
+# 运行时数据：含 SQLite DB（管理员口令哈希、API Key、飞书密钥、调用日志），不应进 git
+data/
+
+# Python
+__pycache__/
+*.pyc

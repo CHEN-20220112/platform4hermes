@@ -77,6 +77,27 @@ def _extract_mcp_inner(cfg: dict, name: str) -> dict:
     return cfg
 
 
+# ---------------------------------------------------------------------------
+# 进程内 MCP 注册状态（前端「配置中」等待界面轮询用）
+# {profile_lower: {"status": "idle"|"registering"|"done"|"error", "results": [...], "total": N}}
+# ---------------------------------------------------------------------------
+_MCP_REGISTER_STATUS: dict = {}
+_MCP_REGISTER_LOCK = threading.Lock()
+
+
+def get_mcp_register_status(profile_lower: str) -> dict:
+    """返回某 profile 的 MCP 注册状态快照（供前端轮询）。"""
+    with _MCP_REGISTER_LOCK:
+        snap = _MCP_REGISTER_STATUS.get(profile_lower)
+        if snap is None:
+            return {"status": "idle", "results": [], "total": 0}
+        return {
+            "status": snap.get("status", "idle"),
+            "results": list(snap.get("results", [])),
+            "total": snap.get("total", 0),
+        }
+
+
 class ProfileRenderer:
     """把专家配置渲染成 Hermes Profile 目录结构并同步到 Hermes 端。"""
 
@@ -218,6 +239,12 @@ class ProfileRenderer:
             # 只合并 model.default（provider/base_url/plugins 等保留 Hermes 的）
             self._merge_platform_config(local_dir / "config.yaml", target / "config.yaml")
 
+            # 把平台级 Hermes API Key 写入该 profile 的 .env（multiplex 下每个
+            # profile 需要自己的 API_SERVER_KEY，否则 API server 会 401 拒绝）
+            api_key = (get_settings(self.db).get("hermes_api_key") or "").strip()
+            if api_key:
+                self._set_env_key(target, "API_SERVER_KEY", api_key)
+
             skills_dst = target / "skills"
             if skills_dst.exists():
                 shutil.rmtree(skills_dst)
@@ -225,7 +252,8 @@ class ProfileRenderer:
         except Exception as exc:  # noqa: BLE001
             return {"status": "error", "reason": str(exc)}
 
-        # MCP 交给 hermes mcp add 管理，放后台线程执行（探活可能较慢，避免阻塞前端保存）
+        # MCP 交给 hermes mcp add 管理，放后台线程执行（探活可能较慢，避免阻塞前端保存）。
+        # 状态写入 _MCP_REGISTER_STATUS，前端轮询 /api/experts/{id}/mcp-sync-status 拿到结果。
         mcp_infos = [
             {
                 "name": mcp.name,
@@ -235,15 +263,47 @@ class ProfileRenderer:
             for mcp in mcp_servers
         ]
 
+        # 全量同步：先把 Hermes 配置里「已存在、但已不在专家绑定列表里」的 MCP 移除。
+        # 平台不能只 add 不 remove，否则已解绑/删除的 MCP（如 hot_news）会残留在 config.yaml
+        # 里继续被 agent 尝试加载，甚至拖垮整次 MCP 发现。
+        desired_names = {info["name"] for info in mcp_infos}
+        current_names: set = set()
+        try:
+            target_cfg = target / "config.yaml"
+            if target_cfg.exists():
+                cfg = yaml.safe_load(target_cfg.read_text(encoding="utf-8")) or {}
+                current_names = set((cfg.get("mcp_servers") or {}).keys())
+        except Exception:  # noqa: BLE001
+            current_names = set()
+        for stale in sorted(current_names - desired_names):
+            self._hermes_mcp_remove(hermes_bin, profile_lower, stale)
+
         def _register_mcp():
+            results: list = []
             for info in mcp_infos:
                 try:
                     result = self._hermes_mcp_add(hermes_bin, profile_lower, info)
                     logger.info("hermes mcp add %s: %s", info["name"], result)
                 except Exception as exc:  # noqa: BLE001
+                    result = {"name": info["name"], "status": "error", "reason": str(exc)}
                     logger.warning("hermes mcp add %s 异常: %s", info["name"], exc)
+                results.append(result)
+                with _MCP_REGISTER_LOCK:
+                    _MCP_REGISTER_STATUS[profile_lower] = {
+                        "status": "registering", "results": list(results), "total": len(mcp_infos),
+                    }
+            status = "error" if any(r.get("status") != "ok" for r in results) else "done"
+            with _MCP_REGISTER_LOCK:
+                _MCP_REGISTER_STATUS[profile_lower] = {
+                    "status": status, "results": results, "total": len(results),
+                    "finished_at": time.time(),
+                }
 
         if mcp_infos:
+            with _MCP_REGISTER_LOCK:
+                _MCP_REGISTER_STATUS[profile_lower] = {
+                    "status": "registering", "results": [], "total": len(mcp_infos),
+                }
             threading.Thread(target=_register_mcp, daemon=True, name="hermes-mcp-add").start()
 
         return {
@@ -251,6 +311,33 @@ class ProfileRenderer:
             "target": str(target),
             "mcp": "后台注册中（%d 个）" % len(mcp_infos) if mcp_infos else [],
         }
+
+    def _hermes_mcp_exists(self, profile_lower: str, name: str) -> bool:
+        """检查 hermes profile 的 config.yaml 是否已注册同名 MCP（决定是否要先回答「覆盖」）。"""
+        try:
+            profiles_root = _resolve_hermes_profiles_dir(get_settings(self.db))
+            cfg_path = profiles_root / profile_lower / "config.yaml"
+            if not cfg_path.exists():
+                return False
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            return name in (cfg.get("mcp_servers") or {})
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _hermes_mcp_remove(self, hermes_bin: str, profile_lower: str, name: str) -> None:
+        """从 hermes profile 移除一个 MCP server（幂等；不存在时不报错）。"""
+        try:
+            proc = subprocess.run(
+                [hermes_bin, "-p", profile_lower, "mcp", "remove", name],
+                input="y\n", capture_output=True, timeout=60, text=True,
+            )
+            if proc.returncode == 0:
+                logger.info("hermes mcp remove %s（已解绑，清理残留配置）", name)
+            else:
+                tail = (proc.stdout or "").strip().splitlines()
+                logger.warning("hermes mcp remove %s 返回 %s: %s", name, proc.returncode, " | ".join(tail[-3:]) if tail else "")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("hermes mcp remove %s 异常: %s", name, exc)
 
     def _hermes_mcp_add(self, hermes_bin: str, profile_lower: str, mcp_info: dict) -> dict:
         """调 ``hermes -p <profile> mcp add`` 注册一个 MCP server（管道喂 y 非交互）。"""
@@ -264,6 +351,8 @@ class ProfileRenderer:
         inner = _extract_mcp_inner(cfg, name)
 
         cmd = [hermes_bin, "-p", profile_lower, "mcp", "add", name, "--connect-timeout", "15"]
+        # stdio：覆盖确认 / 失败仍保存 / 启用全部工具
+        stdin_input = "y\ny\ny\n"
         if mcp_info["transport"] == "stdio":
             command = str(inner.get("command", "")).strip()
             if not command:
@@ -277,11 +366,14 @@ class ProfileRenderer:
             if not url:
                 return {"name": name, "status": "error", "reason": "http 缺少 url"}
             cmd += ["--url", url]
+            # HTTP 会依次问「是否覆盖（若已注册）」「是否需要鉴权」「启用全部工具」。
+            # 未配置鉴权：已注册 → y(覆盖)+n(不需鉴权)+y(启用)；未注册 → n(不需鉴权)+y(启用)。
+            stdin_input = "y\nn\ny\n" if self._hermes_mcp_exists(profile_lower, name) else "n\ny\n"
 
         try:
             proc = subprocess.run(
                 cmd,
-                input="y\ny\ny\n",  # 覆盖确认 / 失败仍保存 / 启用全部工具
+                input=stdin_input,
                 capture_output=True,
                 timeout=120,
                 text=True,
@@ -325,6 +417,31 @@ class ProfileRenderer:
             encoding="utf-8",
         )
 
+    @staticmethod
+    def _set_env_key(target: Path, key: str, value: str) -> None:
+        """把 ``key=value`` 写入/更新到 profile 的 .env（保留其它行不变）。"""
+        env_path = target / ".env"
+        lines = []
+        if env_path.exists():
+            try:
+                lines = env_path.read_text(encoding="utf-8").splitlines()
+            except Exception:  # noqa: BLE001
+                lines = []
+
+        new_lines = []
+        found = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(key + "=") or stripped.startswith(key + " ="):
+                new_lines.append(f"{key}={value}")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append(f"{key}={value}")
+
+        env_path.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
+
 
 class HermesExecutor:
     """把任务转发到本地 Hermes API Server，记录审计日志。"""
@@ -349,6 +466,7 @@ class HermesExecutor:
         task: str,
         open_id: str = "",
         channel: str = "feishu",
+        session_id: str = "",
         on_progress: Optional[Callable[[dict], None]] = None,
     ) -> dict:
         start = time.time()
@@ -379,7 +497,7 @@ class HermesExecutor:
                 "error": err,
             }
 
-        session_id = f"{open_id}_{expert.id}"
+        session_id = session_id or f"{open_id}_{expert.id}"
 
         # 4. 调 HermesClient 流式调用
         try:

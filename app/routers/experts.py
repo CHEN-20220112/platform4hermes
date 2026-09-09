@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ..database import PROFILES_DIR, get_db
 from .. import models
 from ..schemas import ExpertCreate, ExpertUpdate
-from ..services import ProfileRenderer, render_expert
+from ..services import ProfileRenderer, render_expert, get_mcp_register_status
 from .auth import get_current_admin
 
 router = APIRouter(prefix="/api/experts", tags=["experts"],
@@ -153,6 +153,15 @@ def render(expert_id: int, db: Session = Depends(get_db)):
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
+
+
+@router.get("/{expert_id}/mcp-sync-status")
+def mcp_sync_status(expert_id: int, db: Session = Depends(get_db)):
+    """查询该专家的 MCP 注册状态（供前端「配置中」等待界面轮询）。"""
+    expert = db.get(models.Expert, expert_id)
+    if expert is None:
+        raise HTTPException(status_code=404, detail="专家不存在")
+    return get_mcp_register_status(expert.profile_name.lower())
 
 
 @router.get("/{expert_id}/files")

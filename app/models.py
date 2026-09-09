@@ -1,4 +1,4 @@
-"""7 张表 + 2 张多对多关联表。"""
+"""8 张表 + 2 张多对多关联表。"""
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -74,6 +74,22 @@ class Expert(Base):
     mcp_servers = relationship(
         "MCPServer", secondary=expert_mcp_servers, back_populates="experts", lazy="selectin"
     )
+
+
+# ---------------------------------------------------------------------------
+# 2b. Conversation 会话（飞书用户 × 专家 的多会话 / 重置）
+# ---------------------------------------------------------------------------
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    open_id = Column(String(128), nullable=False, index=True)
+    expert_id = Column(Integer, ForeignKey("experts.id"), nullable=True, index=True)
+    # 传给 Hermes 的 X-Hermes-Session-Id；「新对话 / 重置」换新值 = 清空上下文
+    session_key = Column(String(64), unique=True, nullable=False, index=True)
+    title = Column(String(256), default="")  # 首条消息摘要，会话列表展示用
+    created_at = Column(DateTime, default=utcnow, index=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 # ---------------------------------------------------------------------------

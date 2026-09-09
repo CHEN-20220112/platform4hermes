@@ -1,0 +1,15 @@
+# 不进镜像：运行时数据（SQLite DB + 渲染产物 + 凭据）在容器里重新生成/单独挂载
+data/
+**/__pycache__/
+*.pyc
+
+# 版本控制与开发辅助文件
+.git
+.gitignore
+.dockerignore
+Dockerfile
+README.md
+*.ps1
+*.md
+xhs_manual_login.py
+mcp-course-workshop-2026.json

@@ -57,7 +57,7 @@ class ExpertCreate(BaseModel):
     name: str
     system_prompt: str = ""
     profile_name: str
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash-free"
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
     skill_ids: List[int] = []
@@ -98,9 +98,17 @@ class FeishuAppUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
     hermes_api_url: Optional[str] = None
     hermes_api_key: Optional[str] = None
+    hermes_dashboard_url: Optional[str] = None
+    hermes_dashboard_username: Optional[str] = None
+    hermes_dashboard_password: Optional[str] = None
+    hermes_model_provider: Optional[str] = None
     feishu_app_id: Optional[str] = None
     feishu_app_secret: Optional[str] = None
     feishu_mode: Optional[str] = None
     deepseek_api_key: Optional[str] = None
     default_model: Optional[str] = None
     hermes_profiles_dir: Optional[str] = None
+    hermes_mode: Optional[str] = None
+    hermes_bin: Optional[str] = None
+    hermes_local_api_url: Optional[str] = None
+    hermes_local_api_key: Optional[str] = None

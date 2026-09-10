@@ -52,11 +52,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ## 关键约定
 
-- **Hermes 接入**：在「平台设置」配置 `hermes_api_url`（如 `http://localhost:8642`）
-  与 `hermes_api_key`（Hermes API Server 的 API_SERVER_KEY），点「测试连接」验证。
+- **Hermes 接入**：在「平台设置」配置运行目标（远端 / 本机，见下），并填对应
+  的 API URL / API Key，点「测试连接」验证。
 - **Profile 下发**：创建/编辑专家时自动渲染到 `data/profiles/{profile_name}/`，
-  并同步到 `~/.hermes/profiles/{profile_name}/`（目录不存在时先执行
-  `hermes profile create {name}`；Hermes 未安装则静默跳过）。
+  然后按运行目标发布：远端模式走 Dashboard API，本机模式直接写入本机
+  `~/.hermes/profiles/{profile_name}/`（或 `%LOCALAPPDATA%\hermes\profiles`）。
 - **会话隔离**：每个「用户 × 专家」可开多个会话，落在 `conversations` 表；每次
   「新对话 / 重置」都生成新的 `session_key`（即 Hermes 的 `X-Hermes-Session-Id`），
   换 session 即清空上下文，不同会话历史互相独立。
@@ -70,3 +70,50 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 平台只做配置/下发/路由，以下由 Hermes 负责：LLM 推理、ReAct 循环、MCP Client、
 跨任务上下文（state.db）、跨会话记忆（memory/）、Skill 加载执行、自进化。
+
+## Hermes 运行目标（远端 / 本机切换）
+
+平台把「配置下发」与「推理执行」统一抽象成一个运行目标，可在「平台设置 → Hermes 运行目标」切换：
+
+| 模式 | 下发路径 | 执行路径 | 适用场景 |
+| --- | --- | --- | --- |
+| `remote`（默认） | Dashboard HTTP API（`hermes_dashboard_url`） | 远端 API Server（`hermes_api_url`） | 远端 Docker 集中部署 |
+| `local` | 本机 profiles 目录（`hermes_profiles_dir`）+ `hermes` CLI | 本机 multiplex 网关（`hermes_local_api_url`） | 本机已安装 Hermes |
+
+本机模式（`hermes_mode = local`）的关键行为：
+
+1. 渲染产物直接写入 `~/.hermes/profiles/{profile}/`（`SOUL.md`、`config.yaml`、`skills/`），
+   首次会尝试 `hermes profile create {profile}` 初始化完整结构。
+2. `config.yaml` 采用**合并写入**，只覆盖平台管理的 `model.default` 与
+   `gateway.multiplex_profiles`，保留 Hermes 自身写下的其它键。
+3. MCP 通过 `hermes -p {profile} mcp add` 注册；若本机找不到 `hermes` CLI，
+   仅文件下发成功、MCP 跳过并在下发结果里提示。
+4. 执行统一走 `/p/{profile}/v1/chat/completions`（multiplex 共享网关路由）。
+
+Web 后台提供「本地网关控制」按钮，一键启动/停止本机 `hermes gateway run`（OpenAI
+兼容 `api_server` 平台随网关一起跑），自动注入 `GATEWAY_MULTIPLEX_PROFILES=true`、
+`API_SERVER_ENABLED=true`、`API_SERVER_PORT` / `API_SERVER_HOST` / `API_SERVER_KEY`
+并把 `HERMES_HOME` 指向 profiles 根目录的上一级。若未填本地 API Key，平台会自动生成
+一个并回写到「本机 Hermes 接入 → 本地 API Key」，保证网关与执行端使用同一把 key。
+
+你也可以不托管，自己手动启动：
+
+```bash
+GATEWAY_MULTIPLEX_PROFILES=true API_SERVER_ENABLED=true \
+API_SERVER_PORT=8642 API_SERVER_HOST=127.0.0.1 API_SERVER_KEY=<你的key> \
+hermes gateway run
+```
+
+## 多 profile 复用（multiplex）
+
+平台采用 Hermes 官方的多 profile 复用方案：渲染 profile 时写入
+`gateway.multiplex_profiles: true`，由 Hermes 的**单个共享网关**通过
+`/p/{profile}/v1/chat/completions` 路由到对应 profile，不为每个专家分配独立端口。
+
+在 Docker 下，如果 Hermes 启动时忽略 config.yaml 里的 `gateway.multiplex_profiles`
+（见 [issue #94813](https://github.com/NousResearch/hermes-agent/issues/94813)），
+请在 Hermes 容器上设置环境变量强制开启：
+
+```bash
+GATEWAY_MULTIPLEX_PROFILES=true
+```

@@ -198,11 +198,29 @@
     <!-- 平台设置 -->
     <section id="section-settings" class="section">
       <div class="card">
-        <h2>Hermes Agent 接入</h2>
+        <h2>Hermes 运行目标</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label>运行模式</label>
+            <select id="set-hermes-mode" onchange="updateHermesModeUI()">
+              <option value="remote">远端 Docker（Dashboard 下发 + 远端 API Server）</option>
+              <option value="local">本机 Hermes（本地 profiles 目录 + 本地网关）</option>
+            </select>
+          </div>
+        </div>
+        <div class="hint" id="hermes-mode-hint" style="margin-top:12px"></div>
+        <div class="toolbar" style="margin-top:14px">
+          <button class="btn primary" onclick="saveSettings()">保存运行模式</button>
+        </div>
+      </div>
+
+      <div id="remote-hermes-config">
+      <div class="card">
+        <h2>远端 Hermes Agent 接入</h2>
         <div class="form-grid">
           <div class="field full">
             <label>API URL</label>
-            <input id="set-hermes-url" placeholder="http://localhost:8642">
+            <input id="set-hermes-url" placeholder="http://172.16.98.47:18003">
           </div>
           <div class="field full">
             <label>API Key（API_SERVER_KEY）</label>
@@ -213,6 +231,73 @@
           <button class="btn primary" onclick="saveSettings()">保存 Hermes 配置</button>
           <button class="btn" onclick="testHermes()">测试连接</button>
           <span id="test-result"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Profile 下发（Dashboard）</h2>
+        <div class="form-grid">
+          <div class="field full">
+            <label>Dashboard URL</label>
+            <input id="set-dash-url" placeholder="http://172.16.98.47:18004">
+          </div>
+          <div class="field">
+            <label>Dashboard 用户名</label>
+            <input id="set-dash-user" placeholder="admin">
+          </div>
+          <div class="field">
+            <label>Dashboard 密码</label>
+            <input id="set-dash-pass" type="password" placeholder="Dashboard 登录密码">
+          </div>
+          <div class="field">
+            <label>模型 Provider</label>
+            <input id="set-model-provider" placeholder="opencode-free">
+          </div>
+        </div>
+        <div class="hint" style="margin-top:12px">保存专家时会用这里的账号登录 Dashboard，创建/更新 profile、人设、模型、技能和 MCP。</div>
+        <div class="toolbar" style="margin-top:14px">
+          <button class="btn primary" onclick="saveSettings()">保存下发配置</button>
+        </div>
+      </div>
+      </div><!-- /remote-hermes-config -->
+
+      <div id="local-hermes-config" style="display:none">
+        <div class="card">
+          <h2>本机 Hermes 接入</h2>
+          <div class="form-grid">
+            <div class="field full">
+              <label>hermes CLI 路径</label>
+              <input id="set-hermes-bin" placeholder="hermes（或绝对路径）">
+            </div>
+            <div class="field full">
+              <label>Profiles 根目录（留空自动探测）</label>
+              <input id="set-hermes-profiles-dir" placeholder="留空自动探测 ~/.hermes/profiles 或 %LOCALAPPDATA%\hermes\profiles">
+            </div>
+            <div class="field full">
+              <label>本地 API URL</label>
+              <input id="set-local-api-url" placeholder="http://127.0.0.1:8642">
+            </div>
+            <div class="field full">
+              <label>本地 API Key（可选，若本地网关设置了 API_SERVER_KEY）</label>
+              <input id="set-local-api-key" placeholder="本地网关 API Key">
+            </div>
+          </div>
+          <div class="toolbar" style="margin-top:14px">
+            <button class="btn primary" onclick="saveSettings()">保存本机配置</button>
+            <button class="btn" onclick="testHermes()">测试连接</button>
+            <span id="test-result-local"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>本地网关控制（multiplex 单共享网关）</h2>
+          <div class="toolbar">
+            <span><span class="status-dot off" id="local-gw-dot"></span>状态：<b id="local-gw-status">未知</b></span>
+            <div class="spacer"></div>
+            <button class="btn primary" onclick="localGatewayAction('start')">启动网关</button>
+            <button class="btn danger" onclick="localGatewayAction('stop')">停止网关</button>
+          </div>
+          <div class="hint" id="local-gw-info"></div>
         </div>
       </div>
 
@@ -236,7 +321,7 @@
           </div>
           <div class="field">
             <label>默认模型 / DeepSeek Key</label>
-            <input id="set-default-model" placeholder="deepseek-chat">
+            <input id="set-default-model" placeholder="deepseek-v4-flash-free">
             <input id="set-deepseek-key" placeholder="DeepSeek API Key（可选，透传给 Hermes）" style="margin-top:8px">
           </div>
         </div>
@@ -371,6 +456,19 @@ function toastMcpResults(res) {
   }
 }
 
+function toastLocalSync(sync) {
+  const mcps = sync && sync.mcp || [];
+  const bad = mcps.filter(m => m.status === 'error');
+  const skipped = mcps.filter(m => m.status === 'skipped');
+  if (bad.length) {
+    toast('本地下发完成，但 MCP 注册失败：' + bad.map(m => m.name + '(' + (m.reason || m.detail || '失败') + ')').join('；'), true);
+  } else if (skipped.length) {
+    toast('本地下发完成（' + skipped.length + ' 个 MCP 因 hermes CLI 不可用跳过）');
+  } else {
+    toast('本地下发完成' + (mcps.length ? '（' + mcps.length + ' 个 MCP 已注册）' : ''));
+  }
+}
+
 // ---------- 登录 ----------
 async function doLogin() {
   const username = document.getElementById('login-username').value.trim();
@@ -441,7 +539,10 @@ async function renderExpert(id) {
   try {
     const r = await api(`/experts/${id}/render`, 'POST');
     const sync = r.sync || {};
-    if (sync.status === 'synced' && sync.mcp) {
+    if (sync.mode === 'local') {
+      hideSyncOverlay();
+      toastLocalSync(sync);
+    } else if (sync.status === 'synced' && sync.mcp) {
       updateSyncOverlay('正在注册 MCP…');
       const s = await waitMcpSync(id);
       hideSyncOverlay();
@@ -478,7 +579,7 @@ function openExpertModal(id) {
   let html = `<h3>${e ? '编辑专家' : '新建专家'}</h3><div class="form-grid">
     <div class="field"><label>名称</label><input id="f-name" value="${e ? esc(e.name) : ''}"></div>
     <div class="field"><label>Profile 名称（唯一）</label><input id="f-profile" value="${e ? esc(e.profile_name) : ''}"></div>
-    <div class="field"><label>模型</label><input id="f-model" value="${e ? esc(e.model) : 'deepseek-chat'}"></div>
+    <div class="field"><label>模型</label><input id="f-model" value="${e ? esc(e.model) : 'deepseek-v4-flash-free'}"></div>
     <div class="field"><label>飞书 App ID（模式 B）</label><input id="f-appid" value="${e ? esc(e.feishu_app_id) : ''}"></div>
     <div class="field"><label>飞书 App Secret（模式 B）</label><input id="f-appsecret" type="password" value="${e ? esc(e.feishu_app_secret) : ''}"></div>
     <div class="field full"><label>系统提示词（System Prompt）</label>
@@ -511,7 +612,10 @@ async function saveExpert(id) {
     const expertId = r.expert ? r.expert.id : id;
     const sync = r.render && r.render.sync;
     closeModal();
-    if (sync && sync.status === 'synced' && sync.mcp) {
+    if (sync && sync.mode === 'local') {
+      hideSyncOverlay();
+      toastLocalSync(sync);
+    } else if (sync && sync.status === 'synced' && sync.mcp) {
       updateSyncOverlay('正在注册 MCP…');
       const s = await waitMcpSync(expertId);
       hideSyncOverlay();
@@ -638,12 +742,22 @@ async function loadSettings() {
     const s = await api('/settings');
     setVal('set-hermes-url', s.hermes_api_url);
     setVal('set-hermes-key', s.hermes_api_key);
+    setVal('set-dash-url', s.hermes_dashboard_url);
+    setVal('set-dash-user', s.hermes_dashboard_username);
+    setVal('set-dash-pass', s.hermes_dashboard_password);
+    setVal('set-model-provider', s.hermes_model_provider);
     setVal('set-feishu-app-id', s.feishu_app_id);
     setVal('set-feishu-app-secret', s.feishu_app_secret);
     setVal('set-feishu-mode', s.feishu_mode || 'A');
     setVal('set-deepseek-key', s.deepseek_api_key);
     setVal('set-default-model', s.default_model);
+    setVal('set-hermes-mode', s.hermes_mode || 'remote');
+    setVal('set-hermes-bin', s.hermes_bin);
+    setVal('set-hermes-profiles-dir', s.hermes_profiles_dir);
+    setVal('set-local-api-url', s.hermes_local_api_url);
+    setVal('set-local-api-key', s.hermes_local_api_key);
     updateFeishuModeUI();
+    updateHermesModeUI();
     refreshFeishuStatus();
   } catch (e) { toast(e.message, true); }
 }
@@ -651,9 +765,14 @@ async function loadSettings() {
 function _settingsBody() {
   return {
     hermes_api_url: val('set-hermes-url'), hermes_api_key: val('set-hermes-key'),
+    hermes_dashboard_url: val('set-dash-url'), hermes_dashboard_username: val('set-dash-user'),
+    hermes_dashboard_password: val('set-dash-pass'), hermes_model_provider: val('set-model-provider'),
     feishu_app_id: val('set-feishu-app-id'), feishu_app_secret: val('set-feishu-app-secret'),
     feishu_mode: val('set-feishu-mode'), deepseek_api_key: val('set-deepseek-key'),
     default_model: val('set-default-model'),
+    hermes_mode: val('set-hermes-mode'), hermes_bin: val('set-hermes-bin'),
+    hermes_profiles_dir: val('set-hermes-profiles-dir'),
+    hermes_local_api_url: val('set-local-api-url'), hermes_local_api_key: val('set-local-api-key'),
   };
 }
 
@@ -689,17 +808,61 @@ function updateFeishuModeUI() {
   }
 }
 
+function updateHermesModeUI() {
+  const mode = val('set-hermes-mode');
+  const remote = document.getElementById('remote-hermes-config');
+  const local = document.getElementById('local-hermes-config');
+  const hint = document.getElementById('hermes-mode-hint');
+  if (!remote || !local) return;
+  if (mode === 'local') {
+    remote.style.display = 'none';
+    local.style.display = 'block';
+    hint.innerHTML = '本机模式：profile 直接写入本机 Hermes profiles 目录，执行打到本地 multiplex 网关（<code>/p/{profile}</code> 路由）。';
+    refreshLocalGatewayStatus();
+  } else {
+    remote.style.display = 'block';
+    local.style.display = 'none';
+    hint.innerHTML = '远端模式：profile 通过 Dashboard API 下发到远端 Docker，执行打到远端 API Server（<code>GATEWAY_MULTIPLEX_PROFILES=true</code> 共享网关）。';
+  }
+}
+
 async function testHermes() {
-  const el = document.getElementById('test-result');
+  const mode = val('set-hermes-mode');
+  const el = document.getElementById(mode === 'local' ? 'test-result-local' : 'test-result');
   el.textContent = '测试中…';
   try {
     const r = await api('/settings/test-hermes', 'POST', {
-      hermes_api_url: val('set-hermes-url'), hermes_api_key: val('set-hermes-key')
+      hermes_api_url: mode === 'local' ? val('set-local-api-url') : val('set-hermes-url'),
+      hermes_api_key: mode === 'local' ? val('set-local-api-key') : val('set-hermes-key'),
     });
     el.innerHTML = r.ok
       ? `<span class="pill ok">✅ 连接成功（${r.status_code}）</span>`
       : `<span class="pill err">❌ ${esc(r.detail || '失败')}</span>`;
   } catch (e) { el.innerHTML = `<span class="pill err">❌ ${esc(e.message)}</span>`; }
+}
+
+async function refreshLocalGatewayStatus() {
+  try {
+    const r = await api('/settings/local-gateway/status');
+    const dot = document.getElementById('local-gw-dot');
+    const info = document.getElementById('local-gw-info');
+    if (!dot) return;
+    dot.className = 'status-dot ' + (r.running ? 'on' : 'off');
+    document.getElementById('local-gw-status').textContent = r.running
+      ? '运行中 (pid ' + r.pid + ')' : '已停止';
+    info.textContent = r.running
+      ? '命令：' + (r.cmd || '')
+      : (r.log_file ? '日志：' + r.log_file : '');
+  } catch (e) {}
+}
+
+async function localGatewayAction(action) {
+  try {
+    await api('/settings/local-gateway/' + action, 'POST');
+    toast(action === 'start' ? '已启动本地网关' : '已停止本地网关');
+    refreshLocalGatewayStatus();
+    if (action === 'start') loadSettings();  // 刷新可能自动生成的本地 API Key
+  } catch (e) { toast(e.message, true); }
 }
 
 async function refreshFeishuStatus() {

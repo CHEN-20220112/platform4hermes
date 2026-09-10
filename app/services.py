@@ -9,7 +9,9 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import quote
 
+import requests
 import yaml
 from sqlalchemy.orm import Session
 
@@ -98,6 +100,25 @@ def get_mcp_register_status(profile_lower: str) -> dict:
         }
 
 
+def resolve_hermes_target(settings: dict) -> tuple:
+    """按 hermes_mode 解析执行目标，返回 (base_url, api_key, mode)。
+
+    local 模式走本机 multiplex 网关；remote 模式走远端 API Server。
+    """
+    mode = (settings.get("hermes_mode") or "remote").strip().lower()
+    if mode == "local":
+        return (
+            (settings.get("hermes_local_api_url") or "http://127.0.0.1:8642").strip(),
+            (settings.get("hermes_local_api_key") or "").strip(),
+            "local",
+        )
+    return (
+        (settings.get("hermes_api_url") or "").strip(),
+        (settings.get("hermes_api_key") or "").strip(),
+        "remote",
+    )
+
+
 class ProfileRenderer:
     """把专家配置渲染成 Hermes Profile 目录结构并同步到 Hermes 端。"""
 
@@ -148,8 +169,8 @@ class ProfileRenderer:
                 self._render_skill_md(skill), encoding="utf-8"
             )
 
-        # 4. 同步到 Hermes 端（含 hermes mcp add 注册 MCP）
-        sync = self._sync_to_hermes(profile_name, local_dir, mcp_servers)
+        # 4. 同步到 Hermes 端（走 Dashboard HTTP API 下发 profile/skill/MCP）
+        sync = self._sync_to_hermes(profile_name, local_dir, skills, mcp_servers)
 
         return {
             "profile_name": profile_name,
@@ -179,7 +200,7 @@ class ProfileRenderer:
 
     def _render_skill_md(self, skill: models.Skill) -> str:
         frontmatter = {
-            "name": skill.name,
+            "name": self._skill_slug(skill),
             "version": skill.version or "1.0.0",
             "category": skill.category or "",
             "description": skill.description or "",
@@ -189,128 +210,291 @@ class ProfileRenderer:
         return f"---\n{fm}\n---\n\n{skill.content or ''}".strip() + "\n"
 
     def _render_config(self, expert: models.Expert, mcp_servers: list) -> dict:
-        """只渲染 model；MCP 交给 ``hermes mcp add``（职责分离）。
+        """只渲染 model + gateway 复用开关；MCP 交给 ``hermes mcp add``（职责分离）。
 
         model 用嵌套结构 model.default，provider/base_url/plugins 等保留 Hermes 自己的值。
+        gateway.multiplex_profiles=true 让 Hermes 用一个共享网关复用多个 profile
+        （走 /p/{profile}/... 路由），而不是为每个 profile 起独立网关/端口。
         """
         settings = get_settings(self.db)
         model_default = expert.model or settings.get("default_model", "deepseek-chat")
-        return {"model": {"default": model_default}}
+        return {
+            "model": {"default": model_default},
+            "gateway": {"multiplex_profiles": True},
+        }
 
     # ------------------------------------------------------------------
-    def _sync_to_hermes(self, profile_name: str, local_dir: Path, mcp_servers: list) -> dict:
-        """同步 SOUL/config/skills 到 Hermes profiles，并通过 ``hermes mcp add`` 注册 MCP。
+    def _sync_to_hermes(self, profile_name: str, local_dir: Path, skills: list, mcp_servers: list) -> dict:
+        """按 hermes_mode 选择下发目标：local 写本机 profiles 目录，remote 走 Dashboard API。"""
+        settings = get_settings(self.db)
+        mode = (settings.get("hermes_mode") or "remote").strip().lower()
+        if mode == "local":
+            return self._sync_to_local(profile_name, local_dir, skills, mcp_servers)
+        return self._sync_to_remote(profile_name, local_dir, skills, mcp_servers)
 
-        Hermes 会把 profile 名规范成小写，且其实际 profiles 目录随安装方式
-        而变（如 %LOCALAPPDATA%\\hermes\\profiles），故用可配置+自动探测。
+    # ------------------------------------------------------------------
+    def _sync_to_local(self, profile_name: str, local_dir: Path, skills: list, mcp_servers: list) -> dict:
+        """本地模式：把渲染产物直接写入本机 Hermes profiles 目录（数据面/控制面都在本机）。
+
+        与远端 Dashboard 架构对称：
+        - SOUL.md / config.yaml / skills/ 直接落到 ``hermes_profiles_dir/{profile}/``；
+        - MCP 通过 ``hermes -p {profile} mcp add`` 注册（CLI 不可用时跳过并提示）。
         """
-        hermes_bin = shutil.which("hermes")
-        if not hermes_bin:
-            return {"status": "skipped", "reason": "hermes 未安装"}
-
+        settings = get_settings(self.db)
+        profiles_root = _resolve_hermes_profiles_dir(settings)
         profile_lower = profile_name.lower()
-        profiles_root = _resolve_hermes_profiles_dir(get_settings(self.db))
-        target = profiles_root / profile_lower
+        target_dir = profiles_root / profile_lower
+        hermes_bin = self._resolve_hermes_bin(settings.get("hermes_bin") or "hermes")
 
-        # 目录不存在 → 调 hermes profile create 初始化完整结构
-        if not target.exists():
-            try:
-                proc = subprocess.run(
-                    [hermes_bin, "profile", "create", profile_lower],
-                    capture_output=True,
-                    timeout=60,
-                )
-                if proc.returncode != 0:
-                    stderr = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
-                    stdout = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
-                    return {
-                        "status": "error",
-                        "reason": f"profile create 失败: {(stderr or stdout or 'exit %d' % proc.returncode)[:300]}",
-                    }
-            except FileNotFoundError:
-                return {"status": "skipped", "reason": "hermes 未安装"}
-            except Exception as exc:  # noqa: BLE001
-                return {"status": "error", "reason": f"profile create 失败: {exc}"}
+        # 1. 首次创建 profile（优先用 hermes CLI 初始化完整结构，失败则退化 mkdir）
+        if not (target_dir / "SOUL.md").exists() and not (target_dir / "config.yaml").exists():
+            self._ensure_local_profile(hermes_bin, profile_lower, target_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
 
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(local_dir / "SOUL.md", target / "SOUL.md")
+        # 2. SOUL.md
+        soul_src = local_dir / "SOUL.md"
+        if soul_src.exists():
+            shutil.copy2(soul_src, target_dir / "SOUL.md")
 
-            # 只合并 model.default（provider/base_url/plugins 等保留 Hermes 的）
-            self._merge_platform_config(local_dir / "config.yaml", target / "config.yaml")
+        # 3. config.yaml（合并写入，保留 Hermes 自身其它键）
+        self._merge_platform_config(local_dir / "config.yaml", target_dir / "config.yaml")
 
-            # 把平台级 Hermes API Key 写入该 profile 的 .env（multiplex 下每个
-            # profile 需要自己的 API_SERVER_KEY，否则 API server 会 401 拒绝）
-            api_key = (get_settings(self.db).get("hermes_api_key") or "").strip()
-            if api_key:
-                self._set_env_key(target, "API_SERVER_KEY", api_key)
+        # 4. 可选：DeepSeek Key 透传写进 profile 的 .env
+        ds_key = (settings.get("deepseek_api_key") or "").strip()
+        if ds_key:
+            self._set_env_key(target_dir, "DEEPSEEK_API_KEY", ds_key)
 
-            skills_dst = target / "skills"
+        # 5. skills/（同名整体覆盖）
+        skills_src = local_dir / "skills"
+        if skills_src.exists():
+            skills_dst = target_dir / "skills"
             if skills_dst.exists():
                 shutil.rmtree(skills_dst)
-            shutil.copytree(local_dir / "skills", skills_dst, dirs_exist_ok=True)
-        except Exception as exc:  # noqa: BLE001
-            return {"status": "error", "reason": str(exc)}
+            shutil.copytree(skills_src, skills_dst)
 
-        # MCP 交给 hermes mcp add 管理，放后台线程执行（探活可能较慢，避免阻塞前端保存）。
-        # 状态写入 _MCP_REGISTER_STATUS，前端轮询 /api/experts/{id}/mcp-sync-status 拿到结果。
-        mcp_infos = [
-            {
-                "name": mcp.name,
-                "transport": mcp.transport or "http",
-                "config_template": mcp.config_template or "{}",
-            }
-            for mcp in mcp_servers
-        ]
-
-        # 全量同步：先把 Hermes 配置里「已存在、但已不在专家绑定列表里」的 MCP 移除。
-        # 平台不能只 add 不 remove，否则已解绑/删除的 MCP（如 hot_news）会残留在 config.yaml
-        # 里继续被 agent 尝试加载，甚至拖垮整次 MCP 发现。
-        desired_names = {info["name"] for info in mcp_infos}
-        current_names: set = set()
-        try:
-            target_cfg = target / "config.yaml"
-            if target_cfg.exists():
-                cfg = yaml.safe_load(target_cfg.read_text(encoding="utf-8")) or {}
-                current_names = set((cfg.get("mcp_servers") or {}).keys())
-        except Exception:  # noqa: BLE001
-            current_names = set()
-        for stale in sorted(current_names - desired_names):
-            self._hermes_mcp_remove(hermes_bin, profile_lower, stale)
-
-        def _register_mcp():
-            results: list = []
-            for info in mcp_infos:
-                try:
-                    result = self._hermes_mcp_add(hermes_bin, profile_lower, info)
-                    logger.info("hermes mcp add %s: %s", info["name"], result)
-                except Exception as exc:  # noqa: BLE001
-                    result = {"name": info["name"], "status": "error", "reason": str(exc)}
-                    logger.warning("hermes mcp add %s 异常: %s", info["name"], exc)
-                results.append(result)
-                with _MCP_REGISTER_LOCK:
-                    _MCP_REGISTER_STATUS[profile_lower] = {
-                        "status": "registering", "results": list(results), "total": len(mcp_infos),
-                    }
-            status = "error" if any(r.get("status") != "ok" for r in results) else "done"
-            with _MCP_REGISTER_LOCK:
-                _MCP_REGISTER_STATUS[profile_lower] = {
-                    "status": status, "results": results, "total": len(results),
-                    "finished_at": time.time(),
-                }
-
-        if mcp_infos:
-            with _MCP_REGISTER_LOCK:
-                _MCP_REGISTER_STATUS[profile_lower] = {
-                    "status": "registering", "results": [], "total": len(mcp_infos),
-                }
-            threading.Thread(target=_register_mcp, daemon=True, name="hermes-mcp-add").start()
+        # 6. MCP 注册（依赖 hermes CLI）
+        cli_ok = self._hermes_cli_available(hermes_bin)
+        mcp_results = []
+        for mcp in mcp_servers:
+            if not cli_ok:
+                mcp_results.append({"name": mcp.name, "status": "skipped",
+                                    "reason": "hermes CLI 不可用"})
+                continue
+            mcp_results.append(self._hermes_mcp_add(
+                hermes_bin, profile_lower,
+                {"name": mcp.name, "transport": mcp.transport,
+                 "config_template": mcp.config_template},
+            ))
 
         return {
             "status": "synced",
-            "target": str(target),
-            "mcp": "后台注册中（%d 个）" % len(mcp_infos) if mcp_infos else [],
+            "mode": "local",
+            "target": str(target_dir),
+            "hermes_bin": hermes_bin,
+            "cli_available": cli_ok,
+            "skills": [{"name": s.name, "status": "ok"} for s in skills],
+            "mcp": mcp_results,
         }
+
+    # ------------------------------------------------------------------
+    def _sync_to_remote(self, profile_name: str, local_dir: Path, skills: list, mcp_servers: list) -> dict:
+        """远端模式：通过 Dashboard HTTP API 下发 profile（SOUL / 模型 / 技能 / MCP）。
+
+        架构 B：平台跑本机，远端 Hermes 不共享文件系统，改用 Dashboard 的 REST API：
+        - POST /auth/password-login             登录拿会话 cookie
+        - POST /api/profiles                    建 profile
+        - PUT  /api/profiles/{name}/soul        写 SOUL.md
+        - PUT  /api/profiles/{name}/model       写 provider + model
+        - POST /api/skills?profile={name}       写技能
+        - POST /api/mcp/servers?profile={name}  注册 MCP
+        """
+        settings = get_settings(self.db)
+        dash_url = (settings.get("hermes_dashboard_url") or "").strip().rstrip("/")
+        dash_user = (settings.get("hermes_dashboard_username") or "admin").strip()
+        dash_pass = settings.get("hermes_dashboard_password") or ""
+        provider = (settings.get("hermes_model_provider") or "opencode-free").strip()
+
+        if not dash_url:
+            return {"status": "skipped", "reason": "未配置 Dashboard URL"}
+        if not dash_pass:
+            return {"status": "skipped", "reason": "未配置 Dashboard 密码"}
+
+        # 1. 登录拿会话 cookie（requests.Session 自动保存 Set-Cookie）
+        session = requests.Session()
+        try:
+            resp = session.post(
+                f"{dash_url}/auth/password-login",
+                json={"provider": "basic", "username": dash_user, "password": dash_pass, "next": ""},
+                timeout=30,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "reason": f"Dashboard 登录异常: {exc}"}
+        if resp.status_code >= 400:
+            return {"status": "error", "reason": f"Dashboard 登录失败: HTTP {resp.status_code} {resp.text[:200]}"}
+
+        profile_lower = profile_name.lower()
+        pq = quote(profile_lower)
+
+        # 2. 确保 profile 存在
+        existing = self._dash_list_names(session, f"{dash_url}/api/profiles")
+        if profile_lower not in existing and profile_name not in existing:
+            try:
+                r = session.post(
+                    f"{dash_url}/api/profiles",
+                    json={"name": profile_lower, "clone_from": None, "description": ""},
+                    timeout=30,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "reason": f"创建 profile 异常: {exc}"}
+            if r.status_code >= 400 and not self._looks_like_exists(r):
+                return {"status": "error", "reason": f"创建 profile 失败: HTTP {r.status_code} {r.text[:200]}"}
+
+        # 3. 下发 SOUL
+        soul_text = ""
+        soul_file = local_dir / "SOUL.md"
+        if soul_file.exists():
+            soul_text = soul_file.read_text(encoding="utf-8")
+        try:
+            r = session.put(f"{dash_url}/api/profiles/{pq}/soul", json={"content": soul_text}, timeout=30)
+            if r.status_code >= 400:
+                return {"status": "error", "reason": f"下发 SOUL 失败: HTTP {r.status_code} {r.text[:200]}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "reason": f"下发 SOUL 异常: {exc}"}
+
+        # 4. 下发模型（provider + model）
+        model = self._model_from_config(local_dir) or (settings.get("default_model") or "").strip()
+        try:
+            r = session.put(
+                f"{dash_url}/api/profiles/{pq}/model",
+                json={"provider": provider, "model": model},
+                timeout=30,
+            )
+            if r.status_code >= 400:
+                return {"status": "error", "reason": f"下发模型失败: HTTP {r.status_code} {r.text[:200]}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "reason": f"下发模型异常: {exc}"}
+
+        # 5. 下发技能（同名已存在则跳过）
+        skill_results = []
+        existing_skills = self._dash_list_names(session, f"{dash_url}/api/tools/toolsets?profile={pq}")
+        for skill in skills:
+            slug = self._skill_slug(skill)
+            if slug in existing_skills:
+                skill_results.append({"name": skill.name, "status": "exists"})
+                continue
+            content = self._render_skill_md(skill)
+            try:
+                r = session.post(
+                    f"{dash_url}/api/skills?profile={pq}",
+                    json={"name": slug, "content": content,
+                          "category": skill.category or "", "profile": profile_lower},
+                    timeout=30,
+                )
+                skill_results.append({
+                    "name": skill.name,
+                    "status": "ok" if r.status_code < 400 else "error",
+                    "detail": "" if r.status_code < 400 else f"HTTP {r.status_code} {r.text[:120]}",
+                })
+            except Exception as exc:  # noqa: BLE001
+                skill_results.append({"name": skill.name, "status": "error", "detail": str(exc)})
+
+        # 6. 注册 MCP（同名已存在则跳过；解绑/删除后的残留 MCP 暂不在 HTTP 版清理）
+        mcp_results = []
+        existing_mcp = self._dash_list_names(session, f"{dash_url}/api/mcp/servers?profile={pq}")
+        for mcp in mcp_servers:
+            if mcp.name in existing_mcp:
+                mcp_results.append({"name": mcp.name, "status": "exists"})
+                continue
+            url = self._mcp_url(mcp)
+            if not url:
+                mcp_results.append({"name": mcp.name, "status": "error", "reason": "http MCP 缺少 url"})
+                continue
+            try:
+                r = session.post(
+                    f"{dash_url}/api/mcp/servers?profile={pq}",
+                    json={"name": mcp.name, "url": url},
+                    timeout=30,
+                )
+                mcp_results.append({
+                    "name": mcp.name,
+                    "status": "ok" if r.status_code < 400 else "error",
+                    "detail": "" if r.status_code < 400 else f"HTTP {r.status_code} {r.text[:120]}",
+                })
+            except Exception as exc:  # noqa: BLE001
+                mcp_results.append({"name": mcp.name, "status": "error", "detail": str(exc)})
+
+        return {
+            "status": "synced",
+            "target": f"{dash_url}/api/profiles/{profile_lower}",
+            "skills": skill_results,
+            "mcp": mcp_results,
+        }
+
+    @staticmethod
+    def _looks_like_exists(resp) -> bool:
+        text = (resp.text or "").lower()
+        return resp.status_code == 409 or any(
+            k in text for k in ("already exist", "already_exists", "duplicate", "conflict")
+        )
+
+    @staticmethod
+    def _dash_list_names(session, url: str) -> set:
+        """GET 列表接口，防御性地把响应里的所有 name 收进集合。"""
+        names: set = set()
+        try:
+            r = session.get(url, timeout=30)
+            if r.status_code >= 400:
+                return names
+            data = r.json()
+        except Exception:  # noqa: BLE001
+            return names
+
+        def _collect(obj):
+            if isinstance(obj, list):
+                for it in obj:
+                    if isinstance(it, dict) and isinstance(it.get("name"), str):
+                        names.add(it["name"])
+                    elif isinstance(it, str):
+                        names.add(it)
+            elif isinstance(obj, dict):
+                for key in ("profiles", "items", "skills", "toolsets", "servers", "results", "data"):
+                    _collect(obj.get(key))
+
+        _collect(data)
+        return names
+
+    @staticmethod
+    def _model_from_config(local_dir: Path) -> str:
+        cfg_file = local_dir / "config.yaml"
+        try:
+            cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            return ""
+        m = cfg.get("model")
+        if isinstance(m, dict):
+            return str(m.get("default") or "")
+        if isinstance(m, str):
+            return m
+        return ""
+
+    @staticmethod
+    def _skill_slug(skill) -> str:
+        """生成 Dashboard 可接受的技能标识（仅小写字母/数字/连字符/点/下划线）。"""
+        name = (skill.name or "").strip()
+        if name and re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name.lower()):
+            return name.lower()
+        return f"skill-{skill.id}"
+
+    @staticmethod
+    def _mcp_url(mcp) -> str:
+        try:
+            cfg = json.loads(mcp.config_template or "{}")
+        except Exception:  # noqa: BLE001
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        inner = _extract_mcp_inner(cfg, mcp.name)
+        return str(inner.get("url") or "").strip() if isinstance(inner, dict) else ""
 
     def _hermes_mcp_exists(self, profile_lower: str, name: str) -> bool:
         """检查 hermes profile 的 config.yaml 是否已注册同名 MCP（决定是否要先回答「覆盖」）。"""
@@ -389,8 +573,35 @@ class ProfileRenderer:
             return {"name": name, "status": "error", "reason": str(exc)}
 
     @staticmethod
+    def _resolve_hermes_bin(configured: str) -> str:
+        """解析本机 hermes CLI 路径：绝对/带分隔符路径原样返回，否则走 PATH。"""
+        configured = (configured or "hermes").strip()
+        if os.path.sep in configured or (os.name == "nt" and ("\\" in configured or "/" in configured)):
+            return configured
+        return shutil.which(configured) or configured
+
+    @staticmethod
+    def _hermes_cli_available(hermes_bin: str) -> bool:
+        """判断本机 hermes CLI 是否可用（不真正执行，只查 PATH / 文件存在性）。"""
+        if os.path.sep in hermes_bin or (os.name == "nt" and ("\\" in hermes_bin or "/" in hermes_bin)):
+            return os.path.isfile(hermes_bin)
+        return shutil.which(hermes_bin) is not None
+
+    @staticmethod
+    def _ensure_local_profile(hermes_bin: str, profile_lower: str, target_dir: Path) -> None:
+        """首次创建 profile：优先用 ``hermes profile create`` 初始化，失败则退化为 mkdir。"""
+        try:
+            subprocess.run(
+                [hermes_bin, "profile", "create", profile_lower],
+                capture_output=True, timeout=60, text=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
     def _merge_platform_config(local_config: Path, target_config: Path) -> None:
-        """把本地渲染的 model.default 合并进 Hermes 现有 config.yaml，不覆盖其它键。"""
+        """把平台渲染的 model.default + gateway 配置合并进 Hermes 现有 config.yaml，不覆盖其它键。"""
         try:
             local_cfg = yaml.safe_load(local_config.read_text(encoding="utf-8")) or {}
         except Exception:  # noqa: BLE001
@@ -412,6 +623,14 @@ class ProfileRenderer:
             if isinstance(existing["model"], dict):
                 existing["model"]["default"] = local_cfg["model"]["default"]
 
+        # gateway 配置（multiplex_profiles 等）整体合并
+        if isinstance(local_cfg.get("gateway"), dict):
+            existing.setdefault("gateway", {})
+            if isinstance(existing["gateway"], dict):
+                for k, v in local_cfg["gateway"].items():
+                    existing["gateway"][k] = v
+
+        target_config.parent.mkdir(parents=True, exist_ok=True)
         target_config.write_text(
             yaml.safe_dump(existing, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
@@ -478,14 +697,14 @@ class HermesExecutor:
             with ProfileRenderer(self.db) as renderer:
                 renderer.render(expert)
 
-        # 2. 读取 Hermes 接入配置
+        # 2. 读取 Hermes 接入配置（按 hermes_mode 解析执行目标）
         settings = get_settings(self.db)
-        base_url = (settings.get("hermes_api_url") or "").strip()
-        api_key = (settings.get("hermes_api_key") or "").strip()
+        base_url, api_key, hermes_mode = resolve_hermes_target(settings)
 
-        # 3. 未配置 → 引导错误
-        if not base_url or not api_key:
-            err = "请先在平台设置中配置 Hermes Agent 接入（API URL / API Key）"
+        # 3. 未配置 → 引导错误（本机网关允许不设 API Key）
+        if not base_url or (hermes_mode != "local" and not api_key):
+            target_hint = "本机网关（本地 API URL）" if hermes_mode == "local" else "远端 API Server（API URL / API Key）"
+            err = f"请先在平台设置中配置 Hermes Agent 接入（{target_hint}）"
             latency = int((time.time() - start) * 1000)
             self._log(expert, open_id, channel, task, err, 0, latency, "error")
             return {

@@ -28,8 +28,10 @@ class HermesClient:
         SSE 流式调用 Hermes。
 
         优先使用多 profile 路由 /p/{profile_name}/v1/chat/completions；
-        若该路由返回 404/405（服务器不支持多 profile 路由），自动回退到
-        标准路由 /v1/chat/completions。
+        仅当该路由本身不存在（404/405 且非「Unknown or unconfigured profile」，
+        即服务器不支持多 profile 路由）时才回退到标准路由 /v1/chat/completions。
+        若返回的是「profile 未配置/网关未起」这类真实故障，则直接抛错，绝不
+        静默回退到 default（否则会把不同专家/模型的请求全部打到 default）。
 
         返回:
             {response, tool_calls, session_id, tokens}
@@ -50,8 +52,22 @@ class HermesClient:
                 )
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else None
-                # 路由不存在（404/405）→ 尝试下一个候选 URL
-                if status in (404, 405) and url != candidates[-1]:
+                body = ""
+                if exc.response is not None:
+                    try:
+                        body = (exc.response.text or "").lower()
+                    except Exception:  # noqa: BLE001
+                        body = ""
+
+                # 「Unknown or unconfigured profile」表示 profile 路由本身存在，
+                # 但该 profile 的网关没有起来 / 未配置 —— 这是真实故障，必须抛错，
+                # 不能回退到 /v1/chat/completions，否则所有专家都会静默落到 default，
+                # 用错误的模型出结果（这正是「全部打到 default」的根因）。
+                profile_missing = "unknown or unconfigured profile" in body or "unconfigured profile" in body
+
+                # 仅当「多 profile 路由本身不存在」时才回退：404/405 且响应体不是
+                # 「profile 未配置」（例如旧版 Hermes 根本不支持 /p/{profile} 路由）。
+                if url != candidates[-1] and status in (404, 405) and not profile_missing:
                     logger.warning(
                         "Hermes 路由 %s 返回 HTTP %s，回退标准路由", url, status
                     )
@@ -74,11 +90,13 @@ class HermesClient:
         timeout: int,
     ) -> dict:
         headers = {
-            "Authorization": f"Bearer {api_key}",
             "X-Hermes-Session-Id": session_id,
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
+        # 本机网关可能不设 API_SERVER_KEY，此时不发送 Authorization，避免空 Bearer 被拒
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
 
         messages = []
         if system_prompt:

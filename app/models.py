@@ -61,7 +61,7 @@ class Expert(Base):
     name = Column(String(128), nullable=False)
     system_prompt = Column(Text, default="")
     profile_name = Column(String(128), unique=True, nullable=False, index=True)
-    model = Column(String(128), default="deepseek-v4-flash-free")
+    model = Column(String(128), default="upstage/solar-pro4:free")
     # 模式 B（一专家一机器人）时使用的独立飞书 App 凭据
     feishu_app_id = Column(String(128), default="")
     feishu_app_secret = Column(String(256), default="")

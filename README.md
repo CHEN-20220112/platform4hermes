@@ -86,9 +86,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
    首次会尝试 `hermes profile create {profile}` 初始化完整结构。
 2. `config.yaml` 采用**合并写入**，只覆盖平台管理的 `model.default` 与
    `gateway.multiplex_profiles`，保留 Hermes 自身写下的其它键。
-3. MCP 通过 `hermes -p {profile} mcp add` 注册；若本机找不到 `hermes` CLI，
-   仅文件下发成功、MCP 跳过并在下发结果里提示。
+3. MCP 采用**声明式对账**直接写 `config.yaml` 的 `mcp_servers`：绑定新增、
+   **解绑自动清理**（不依赖 `hermes` CLI，因此 MCP 下发不要求 CLI 可用）。
 4. 执行统一走 `/p/{profile}/v1/chat/completions`（multiplex 共享网关路由）。
+
+MCP 解绑清理在两种模式下都生效：本地模式直接对账 `config.yaml`；远端模式通过
+`DELETE /api/mcp/servers/{name}?profile={profile}` 删除已解绑的 MCP。所谓「清理」指
+**以专家当前绑定的 MCP 集合为准**，profile 里多余（未绑定）的 MCP 会被移除。
 
 Web 后台提供「本地网关控制」按钮，一键启动/停止本机 `hermes gateway run`（OpenAI
 兼容 `api_server` 平台随网关一起跑），自动注入 `GATEWAY_MULTIPLEX_PROFILES=true`、

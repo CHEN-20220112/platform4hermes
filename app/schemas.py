@@ -57,7 +57,7 @@ class ExpertCreate(BaseModel):
     name: str
     system_prompt: str = ""
     profile_name: str
-    model: str = "deepseek-v4-flash-free"
+    model: str = "upstage/solar-pro4:free"
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
     skill_ids: List[int] = []

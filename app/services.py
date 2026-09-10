@@ -238,7 +238,8 @@ class ProfileRenderer:
 
         与远端 Dashboard 架构对称：
         - SOUL.md / config.yaml / skills/ 直接落到 ``hermes_profiles_dir/{profile}/``；
-        - MCP 通过 ``hermes -p {profile} mcp add`` 注册（CLI 不可用时跳过并提示）。
+        - MCP 直接对账写 config.yaml 的 ``mcp_servers``（绑定新增、解绑清理），
+          不依赖 hermes CLI（CLI 仅用于首次 ``profile create``）。
         """
         settings = get_settings(self.db)
         profiles_root = _resolve_hermes_profiles_dir(settings)
@@ -272,26 +273,15 @@ class ProfileRenderer:
                 shutil.rmtree(skills_dst)
             shutil.copytree(skills_src, skills_dst)
 
-        # 6. MCP 注册（依赖 hermes CLI）
-        cli_ok = self._hermes_cli_available(hermes_bin)
-        mcp_results = []
-        for mcp in mcp_servers:
-            if not cli_ok:
-                mcp_results.append({"name": mcp.name, "status": "skipped",
-                                    "reason": "hermes CLI 不可用"})
-                continue
-            mcp_results.append(self._hermes_mcp_add(
-                hermes_bin, profile_lower,
-                {"name": mcp.name, "transport": mcp.transport,
-                 "config_template": mcp.config_template},
-            ))
+        # 6. MCP 对账：绑定新增、解绑清理（直接写 config.yaml 的 mcp_servers）
+        mcp_results = self._reconcile_local_mcp(target_dir, mcp_servers)
 
         return {
             "status": "synced",
             "mode": "local",
             "target": str(target_dir),
             "hermes_bin": hermes_bin,
-            "cli_available": cli_ok,
+            "cli_available": self._hermes_cli_available(hermes_bin),
             "skills": [{"name": s.name, "status": "ok"} for s in skills],
             "mcp": mcp_results,
         }
@@ -398,7 +388,7 @@ class ProfileRenderer:
             except Exception as exc:  # noqa: BLE001
                 skill_results.append({"name": skill.name, "status": "error", "detail": str(exc)})
 
-        # 6. 注册 MCP（同名已存在则跳过；解绑/删除后的残留 MCP 暂不在 HTTP 版清理）
+        # 6. 注册 MCP（同名已存在则跳过）
         mcp_results = []
         existing_mcp = self._dash_list_names(session, f"{dash_url}/api/mcp/servers?profile={pq}")
         for mcp in mcp_servers:
@@ -423,8 +413,25 @@ class ProfileRenderer:
             except Exception as exc:  # noqa: BLE001
                 mcp_results.append({"name": mcp.name, "status": "error", "detail": str(exc)})
 
+        # 7. 解绑清理：删除 Dashboard 上已注册、但已不在绑定集合中的 MCP
+        bound_names = {mcp.name for mcp in mcp_servers}
+        for name in sorted(existing_mcp - bound_names):
+            try:
+                r = session.delete(
+                    f"{dash_url}/api/mcp/servers/{quote(name)}?profile={pq}",
+                    timeout=30,
+                )
+                mcp_results.append({
+                    "name": name,
+                    "status": "removed" if r.status_code < 400 else "error",
+                    "detail": "" if r.status_code < 400 else f"HTTP {r.status_code} {r.text[:120]}",
+                })
+            except Exception as exc:  # noqa: BLE001
+                mcp_results.append({"name": name, "status": "error", "detail": str(exc)})
+
         return {
             "status": "synced",
+            "mode": "remote",
             "target": f"{dash_url}/api/profiles/{profile_lower}",
             "skills": skill_results,
             "mcp": mcp_results,
@@ -496,81 +503,98 @@ class ProfileRenderer:
         inner = _extract_mcp_inner(cfg, mcp.name)
         return str(inner.get("url") or "").strip() if isinstance(inner, dict) else ""
 
-    def _hermes_mcp_exists(self, profile_lower: str, name: str) -> bool:
-        """检查 hermes profile 的 config.yaml 是否已注册同名 MCP（决定是否要先回答「覆盖」）。"""
+    @staticmethod
+    def _read_target_config(target_dir: Path) -> dict:
+        """读取本地 profile 的 config.yaml（不存在/损坏返回空 dict）。"""
         try:
-            profiles_root = _resolve_hermes_profiles_dir(get_settings(self.db))
-            cfg_path = profiles_root / profile_lower / "config.yaml"
-            if not cfg_path.exists():
-                return False
-            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-            return name in (cfg.get("mcp_servers") or {})
+            cfg_path = target_dir / "config.yaml"
+            loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+            return loaded if isinstance(loaded, dict) else {}
         except Exception:  # noqa: BLE001
-            return False
+            return {}
 
-    def _hermes_mcp_remove(self, hermes_bin: str, profile_lower: str, name: str) -> None:
-        """从 hermes profile 移除一个 MCP server（幂等；不存在时不报错）。"""
-        try:
-            proc = subprocess.run(
-                [hermes_bin, "-p", profile_lower, "mcp", "remove", name],
-                input="y\n", capture_output=True, timeout=60, text=True,
-            )
-            if proc.returncode == 0:
-                logger.info("hermes mcp remove %s（已解绑，清理残留配置）", name)
-            else:
-                tail = (proc.stdout or "").strip().splitlines()
-                logger.warning("hermes mcp remove %s 返回 %s: %s", name, proc.returncode, " | ".join(tail[-3:]) if tail else "")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("hermes mcp remove %s 异常: %s", name, exc)
+    @staticmethod
+    def _write_target_config(target_dir: Path, cfg: dict) -> None:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "config.yaml").write_text(
+            yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
 
-    def _hermes_mcp_add(self, hermes_bin: str, profile_lower: str, mcp_info: dict) -> dict:
-        """调 ``hermes -p <profile> mcp add`` 注册一个 MCP server（管道喂 y 非交互）。"""
-        name = mcp_info["name"]
+    @staticmethod
+    def _mcp_config_entry(mcp) -> Optional[dict]:
+        """把平台 MCP 配置转成 Hermes config.yaml 的 ``mcp_servers.<name>`` 条目。
+
+        http/sse → ``{url, headers?, auth?}``；stdio → ``{command, args?, env?}``。
+        与 Hermes Dashboard 的 ``_normalize_mcp_server_create`` 输出形态一致。
+        """
         try:
-            cfg = json.loads(mcp_info["config_template"] or "{}")
-        except json.JSONDecodeError:
+            cfg = json.loads(mcp.config_template or "{}")
+        except Exception:  # noqa: BLE001
             cfg = {}
         if not isinstance(cfg, dict):
             cfg = {}
-        inner = _extract_mcp_inner(cfg, name)
+        inner = _extract_mcp_inner(cfg, mcp.name)
+        if not isinstance(inner, dict):
+            return None
 
-        cmd = [hermes_bin, "-p", profile_lower, "mcp", "add", name, "--connect-timeout", "15"]
-        # stdio：覆盖确认 / 失败仍保存 / 启用全部工具
-        stdin_input = "y\ny\ny\n"
-        if mcp_info["transport"] == "stdio":
+        if mcp.transport == "stdio":
             command = str(inner.get("command", "")).strip()
             if not command:
-                return {"name": name, "status": "error", "reason": "stdio 缺少 command"}
-            cmd += ["--command", command]
+                return None
+            entry: dict = {"command": command}
             args = inner.get("args") or []
             if args:
-                cmd += ["--args"] + [str(a) for a in args]
-        else:  # http / sse
-            url = str(inner.get("url", "")).strip()
-            if not url:
-                return {"name": name, "status": "error", "reason": "http 缺少 url"}
-            cmd += ["--url", url]
-            # HTTP 会依次问「是否覆盖（若已注册）」「是否需要鉴权」「启用全部工具」。
-            # 未配置鉴权：已注册 → y(覆盖)+n(不需鉴权)+y(启用)；未注册 → n(不需鉴权)+y(启用)。
-            stdin_input = "y\nn\ny\n" if self._hermes_mcp_exists(profile_lower, name) else "n\ny\n"
+                entry["args"] = [str(a) for a in args]
+            env = inner.get("env")
+            if isinstance(env, dict) and env:
+                entry["env"] = {str(k): str(v) for k, v in env.items()}
+            return entry
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                input=stdin_input,
-                capture_output=True,
-                timeout=120,
-                text=True,
-            )
-            tail = (proc.stdout or "").strip().splitlines()
-            return {
-                "name": name,
-                "status": "ok" if proc.returncode == 0 else "error",
-                "exit": proc.returncode,
-                "detail": " | ".join(tail[-3:]) if tail else "",
-            }
-        except Exception as exc:  # noqa: BLE001
-            return {"name": name, "status": "error", "reason": str(exc)}
+        # http / sse
+        url = str(inner.get("url", "")).strip()
+        if not url:
+            return None
+        entry = {"url": url}
+        headers = inner.get("headers")
+        if isinstance(headers, dict) and headers:
+            entry["headers"] = {str(k): str(v) for k, v in headers.items()}
+        if inner.get("auth"):
+            entry["auth"] = str(inner["auth"])
+        return entry
+
+    def _reconcile_local_mcp(self, target_dir: Path, mcp_servers: list) -> list:
+        """对账本地 profile 的 mcp_servers：绑定新增、解绑清理（声明式）。"""
+        cfg = self._read_target_config(target_dir)
+        servers = cfg.get("mcp_servers")
+        servers = servers if isinstance(servers, dict) else {}
+        bound_names = {mcp.name for mcp in mcp_servers}
+        results = []
+
+        # 绑定：新增缺失的
+        for mcp in mcp_servers:
+            if mcp.name in servers:
+                results.append({"name": mcp.name, "status": "exists"})
+                continue
+            entry = self._mcp_config_entry(mcp)
+            if entry is None:
+                results.append({"name": mcp.name, "status": "error",
+                                "reason": "缺少 url/command"})
+                continue
+            servers[mcp.name] = entry
+            results.append({"name": mcp.name, "status": "ok"})
+
+        # 解绑：移除已注册但不在绑定集合中的
+        for name in sorted(set(servers) - bound_names):
+            servers.pop(name, None)
+            results.append({"name": name, "status": "removed"})
+
+        if servers:
+            cfg["mcp_servers"] = servers
+        else:
+            cfg.pop("mcp_servers", None)
+        self._write_target_config(target_dir, cfg)
+        return results
 
     @staticmethod
     def _resolve_hermes_bin(configured: str) -> str:

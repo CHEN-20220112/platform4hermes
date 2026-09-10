@@ -65,6 +65,10 @@ def _patch_lark_ws_loop():
     _thread_loops: dict = {}
     _lock = threading.Lock()
 
+    def _register_loop(loop):
+        """把「当前线程」的事件循环注册进代理，供跨线程 stop 时按线程定位。"""
+        _thread_loops[threading.get_ident()] = loop
+
     class _LoopProxy:
         def _get(self):
             tid = threading.get_ident()
@@ -81,6 +85,7 @@ def _patch_lark_ws_loop():
 
     _ws_module.loop = _LoopProxy()
     _ws_module._hermes_loop_patched = True
+    _ws_module._hermes_register_loop = _register_loop
 
 
 _patch_lark_ws_loop()
@@ -124,6 +129,7 @@ class _FeishuBot:
         self._client = None
         self._rest = None
         self._thread = None
+        self._loop = None  # bot 线程的事件循环，stop() 用它跨线程关闭长连接
 
     # ------------------------------------------------------------------
     def start(self):
@@ -160,18 +166,45 @@ class _FeishuBot:
 
     def _run_ws(self):
         """在独立线程里跑 ws.Client（loop 已由 _patch_lark_ws_loop 按线程本地代理）。"""
+        import lark_oapi.ws.client as _ws_client
         try:
+            # 在本线程显式创建事件循环并注册到 lark-oapi 的线程本地代理，保存真实引用，
+            # 供 stop() 跨线程「关连接 + 停循环」。lark-oapi 的 ws.Client 只有 start()
+            # 没有 stop()，否则旧长连接永远断不掉（这正是新旧应用同时在线的原因）。
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            if hasattr(_ws_client, "_hermes_register_loop"):
+                _ws_client._hermes_register_loop(loop)
+            self._loop = loop
             self._client.start()
+        except RuntimeError as exc:
+            # 正常 stop()：loop.stop() 会让 run_until_complete 抛「Event loop stopped…」
+            if "Event loop stopped" in str(exc):
+                logger.info("飞书 bot 已停止 app_id=%s", self.app_id)
+            else:
+                logger.error("飞书 WS 连接失败 app_id=%s: %s", self.app_id, exc)
         except Exception as exc:  # noqa: BLE001
             logger.error("飞书 WS 连接失败 app_id=%s: %s", self.app_id, exc)
 
     def stop(self):
-        if self._client is not None:
+        # lark-oapi 的 ws.Client 没有 stop()：旧的 `self._client.stop()` 会抛
+        # AttributeError 被吞掉，旧长连接永远不关。这里改为真正关闭连接 + 停止循环。
+        if self._client is not None and self._loop is not None:
             try:
-                self._client.stop()
+                fut = asyncio.run_coroutine_threadsafe(self._client._disconnect(), self._loop)
+                try:
+                    fut.result(timeout=3)
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception:  # noqa: BLE001
+                pass
+        if self._loop is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
             except Exception:  # noqa: BLE001
                 pass
         self._client = None
+        self._loop = None
 
     # ------------------------------------------------------------------
     # 事件回调
@@ -187,6 +220,8 @@ class _FeishuBot:
         if message is None:
             return
         message_id = getattr(message, "message_id", "") or ""
+        chat_id = getattr(message, "chat_id", "") or ""
+        chat_type = getattr(message, "chat_type", "") or ""
         text = self._extract_text(message)
         open_id = self._extract_open_id(event)
         if not text.strip() or not open_id:
@@ -197,7 +232,10 @@ class _FeishuBot:
             logger.info("忽略重复投递 message_id=%s text=%s", message_id, text[:30])
             return
 
-        logger.info("收到消息 message_id=%s open_id=%s text=%s", message_id, open_id, text[:50])
+        logger.info(
+            "收到消息 message_id=%s open_id=%s chat_id=%s chat_type=%s text=%s",
+            message_id, open_id, chat_id, chat_type, text[:50],
+        )
         # 独立线程处理，避免阻塞 WS 事件循环（否则心跳超时 → 断线重连 → 重投递）
         threading.Thread(
             target=self.adapter.handle_message,

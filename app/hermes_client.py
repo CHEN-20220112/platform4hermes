@@ -112,6 +112,7 @@ class HermesClient:
         tool_calls: list = []
         response_parts: list = []
         tokens = 0
+        error_msgs: list = []
 
         with requests.post(
             url, headers=headers, json=body, stream=True, timeout=timeout
@@ -142,12 +143,41 @@ class HermesClient:
                     data.get("usage"), dict
                 ) else tokens
 
-        return {
-            "response": "".join(response_parts).strip(),
+                # Hermes 把「模型不存在 / 工具失败」这类真实故障也包装成
+                # HTTP 200 的 SSE 流，仅通过 finish_reason=error 表达。若不主动
+                # 捕获，平台会把空回复当成「成功」，导致飞书显示「已完成」却无内容。
+                errored = any(
+                    choice.get("finish_reason") == "error"
+                    for choice in (data.get("choices") or [])
+                )
+                if errored:
+                    error_msgs.append(
+                        HermesClient._stream_error(data) or "Hermes 执行出错（无错误详情）"
+                    )
+
+        response_text = "".join(response_parts).strip()
+        if error_msgs and not response_text:
+            raise RuntimeError("; ".join(dict.fromkeys(error_msgs)))
+
+        result = {
+            "response": response_text,
             "tool_calls": tool_calls,
             "session_id": session_id,
             "tokens": int(tokens or 0),
         }
+        if error_msgs:
+            result["error"] = "; ".join(dict.fromkeys(error_msgs))
+        return result
+
+    @staticmethod
+    def _stream_error(data: dict) -> str:
+        """从 SSE 事件里提取错误信息（error 字段可能是 dict 或 str）。"""
+        err = data.get("error")
+        if isinstance(err, dict):
+            return str(err.get("message") or err.get("type") or "").strip()
+        if isinstance(err, str):
+            return err.strip()
+        return ""
 
     @staticmethod
     def _handle_event(data: dict, tool_calls: list, response_parts: list, on_progress) -> None:

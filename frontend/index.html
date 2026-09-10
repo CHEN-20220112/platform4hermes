@@ -321,7 +321,7 @@
           </div>
           <div class="field">
             <label>默认模型 / DeepSeek Key</label>
-            <input id="set-default-model" placeholder="deepseek-v4-flash-free">
+            <input id="set-default-model" placeholder="upstage/solar-pro4:free">
             <input id="set-deepseek-key" placeholder="DeepSeek API Key（可选，透传给 Hermes）" style="margin-top:8px">
           </div>
         </div>
@@ -456,17 +456,23 @@ function toastMcpResults(res) {
   }
 }
 
-function toastLocalSync(sync) {
-  const mcps = sync && sync.mcp || [];
+function toastSyncMCP(sync) {
+  const mode = sync && sync.mode;
+  const mcps = (sync && sync.mcp) || [];
   const bad = mcps.filter(m => m.status === 'error');
   const skipped = mcps.filter(m => m.status === 'skipped');
+  const removed = mcps.filter(m => m.status === 'removed');
+  const added = mcps.filter(m => m.status === 'ok');
+  const label = mode === 'local' ? '本地下发' : '远端下发';
   if (bad.length) {
-    toast('本地下发完成，但 MCP 注册失败：' + bad.map(m => m.name + '(' + (m.reason || m.detail || '失败') + ')').join('；'), true);
-  } else if (skipped.length) {
-    toast('本地下发完成（' + skipped.length + ' 个 MCP 因 hermes CLI 不可用跳过）');
-  } else {
-    toast('本地下发完成' + (mcps.length ? '（' + mcps.length + ' 个 MCP 已注册）' : ''));
+    toast(label + '完成，但 MCP 处理失败：' + bad.map(m => m.name + '(' + (m.reason || m.detail || '失败') + ')').join('；'), true);
+    return;
   }
+  const parts = [];
+  if (added.length) parts.push('新增 ' + added.length);
+  if (removed.length) parts.push('清理 ' + removed.length);
+  if (skipped.length) parts.push('跳过 ' + skipped.length);
+  toast(label + '完成' + (parts.length ? '（MCP：' + parts.join('，') + '）' : ''));
 }
 
 // ---------- 登录 ----------
@@ -539,14 +545,9 @@ async function renderExpert(id) {
   try {
     const r = await api(`/experts/${id}/render`, 'POST');
     const sync = r.sync || {};
-    if (sync.mode === 'local') {
+    if (sync.status === 'synced' && sync.mcp) {
       hideSyncOverlay();
-      toastLocalSync(sync);
-    } else if (sync.status === 'synced' && sync.mcp) {
-      updateSyncOverlay('正在注册 MCP…');
-      const s = await waitMcpSync(id);
-      hideSyncOverlay();
-      toastMcpResults(s);
+      toastSyncMCP(sync);
     } else {
       hideSyncOverlay();
       toast(`渲染完成：${sync.status || 'ok'}`);
@@ -579,7 +580,7 @@ function openExpertModal(id) {
   let html = `<h3>${e ? '编辑专家' : '新建专家'}</h3><div class="form-grid">
     <div class="field"><label>名称</label><input id="f-name" value="${e ? esc(e.name) : ''}"></div>
     <div class="field"><label>Profile 名称（唯一）</label><input id="f-profile" value="${e ? esc(e.profile_name) : ''}"></div>
-    <div class="field"><label>模型</label><input id="f-model" value="${e ? esc(e.model) : 'deepseek-v4-flash-free'}"></div>
+    <div class="field"><label>模型</label><input id="f-model" value="${e ? esc(e.model) : 'upstage/solar-pro4:free'}"><div class="hint">免费档模型例如 upstage/solar-pro4:free、stepfun/step-3.7-flash:free；模型 ID 写错会导致专家“无回复”</div></div>
     <div class="field"><label>飞书 App ID（模式 B）</label><input id="f-appid" value="${e ? esc(e.feishu_app_id) : ''}"></div>
     <div class="field"><label>飞书 App Secret（模式 B）</label><input id="f-appsecret" type="password" value="${e ? esc(e.feishu_app_secret) : ''}"></div>
     <div class="field full"><label>系统提示词（System Prompt）</label>
@@ -599,27 +600,42 @@ function openExpertModal(id) {
 }
 
 async function saveExpert(id) {
-  const body = {
+  const form = {
     name: val('f-name'), profile_name: val('f-profile'), model: val('f-model'),
     system_prompt: val('f-prompt'), feishu_app_id: val('f-appid'), feishu_app_secret: val('f-appsecret'),
     skill_ids: checkedVals('#skill-checks input'),
     mcp_server_ids: checkedVals('#mcp-checks input'),
   };
-  if (!body.name || !body.profile_name) return toast('名称和 Profile 名称为必填', true);
+  if (!form.name || !form.profile_name) return toast('名称和 Profile 名称为必填', true);
+
+  // 编辑时只提交真正变化的字段：避免“只改名字”却把模型/提示词等其它字段
+  // 用前端缓存的旧值覆盖回去（此前整表提交，状态滞后就会把已修好的模型改回坏值）。
+  let payload = form;
+  if (id) {
+    const orig = state.experts.find(x => x.id === id);
+    if (orig) {
+      const before = {
+        name: orig.name, profile_name: orig.profile_name, model: orig.model,
+        system_prompt: orig.system_prompt, feishu_app_id: orig.feishu_app_id,
+        feishu_app_secret: orig.feishu_app_secret,
+        skill_ids: orig.skill_ids, mcp_server_ids: orig.mcp_server_ids,
+      };
+      payload = {};
+      for (const k of Object.keys(form)) {
+        if (JSON.stringify(form[k]) !== JSON.stringify(before[k])) payload[k] = form[k];
+      }
+    }
+  }
+
   showSyncOverlay('正在保存专家并下发配置…');
   try {
-    const r = id ? await api(`/experts/${id}`, 'PUT', body) : await api('/experts', 'POST', body);
+    const r = id ? await api(`/experts/${id}`, 'PUT', payload) : await api('/experts', 'POST', form);
     const expertId = r.expert ? r.expert.id : id;
     const sync = r.render && r.render.sync;
     closeModal();
-    if (sync && sync.mode === 'local') {
+    if (sync && sync.status === 'synced' && sync.mcp) {
       hideSyncOverlay();
-      toastLocalSync(sync);
-    } else if (sync && sync.status === 'synced' && sync.mcp) {
-      updateSyncOverlay('正在注册 MCP…');
-      const s = await waitMcpSync(expertId);
-      hideSyncOverlay();
-      toastMcpResults(s);
+      toastSyncMCP(sync);
     } else {
       hideSyncOverlay();
       toast(`已保存，profile 同步：${(sync && sync.status) || 'ok'}`);

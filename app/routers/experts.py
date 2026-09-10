@@ -39,6 +39,7 @@ def _expert_to_dict(expert: models.Expert) -> dict:
         "feishu_app_secret": expert.feishu_app_secret or "",
         "skill_ids": [s.id for s in expert.skills],
         "mcp_server_ids": [m.id for m in expert.mcp_servers],
+        "plugin_ids": [p.id for p in expert.plugins],
         "skills": [
             {"id": s.id, "name": s.name, "version": s.version, "category": s.category}
             for s in expert.skills
@@ -47,13 +48,17 @@ def _expert_to_dict(expert: models.Expert) -> dict:
             {"id": m.id, "name": m.name, "transport": m.transport}
             for m in expert.mcp_servers
         ],
+        "plugins": [
+            {"id": p.id, "name": p.name, "version": p.version}
+            for p in expert.plugins
+        ],
         "created_at": expert.created_at.isoformat() if expert.created_at else "",
         "updated_at": expert.updated_at.isoformat() if expert.updated_at else "",
     }
 
 
 def _apply_relations(db: Session, expert: models.Expert,
-                     skill_ids, mcp_server_ids) -> None:
+                     skill_ids, mcp_server_ids, plugin_ids=None) -> None:
     if skill_ids is not None:
         expert.skills = (
             db.query(models.Skill).filter(models.Skill.id.in_(skill_ids)).all()
@@ -63,6 +68,11 @@ def _apply_relations(db: Session, expert: models.Expert,
         expert.mcp_servers = (
             db.query(models.MCPServer).filter(models.MCPServer.id.in_(mcp_server_ids)).all()
             if mcp_server_ids else []
+        )
+    if plugin_ids is not None:
+        expert.plugins = (
+            db.query(models.Plugin).filter(models.Plugin.id.in_(plugin_ids)).all()
+            if plugin_ids else []
         )
 
 
@@ -98,7 +108,8 @@ def create_expert(payload: ExpertCreate, db: Session = Depends(get_db)):
     )
     db.add(expert)
     db.flush()
-    _apply_relations(db, expert, payload.skill_ids, payload.mcp_server_ids)
+    _apply_relations(db, expert, payload.skill_ids, payload.mcp_server_ids,
+                     payload.plugin_ids)
     db.commit()
     db.refresh(expert)
 
@@ -124,9 +135,10 @@ def update_expert(expert_id: int, payload: ExpertUpdate, db: Session = Depends(g
 
     skill_ids = data.pop("skill_ids", None)
     mcp_ids = data.pop("mcp_server_ids", None)
+    plugin_ids = data.pop("plugin_ids", None)
     for k, v in data.items():
         setattr(expert, k, v)
-    _apply_relations(db, expert, skill_ids, mcp_ids)
+    _apply_relations(db, expert, skill_ids, mcp_ids, plugin_ids)
     db.commit()
     db.refresh(expert)
 

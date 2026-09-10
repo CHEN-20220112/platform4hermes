@@ -62,6 +62,7 @@ class ExpertCreate(BaseModel):
     feishu_app_secret: str = ""
     skill_ids: List[int] = []
     mcp_server_ids: List[int] = []
+    plugin_ids: List[int] = []
 
 
 class ExpertUpdate(BaseModel):
@@ -73,6 +74,7 @@ class ExpertUpdate(BaseModel):
     feishu_app_secret: Optional[str] = None
     skill_ids: Optional[List[int]] = None
     mcp_server_ids: Optional[List[int]] = None
+    plugin_ids: Optional[List[int]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +92,55 @@ class FeishuAppUpdate(BaseModel):
     app_name: Optional[str] = None
     mode: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
+# Plugin
+# ---------------------------------------------------------------------------
+class PluginInstallRequest(BaseModel):
+    source: str          # owner/repo、owner/repo/subdir 或 https://... / git@...
+    force: bool = False  # 强制重装（先删除已有目录）
+    enable: bool = True  # 安装后启用
+
+
+class PluginToggleRequest(BaseModel):
+    enabled: bool
+
+
+# ---------------------------------------------------------------------------
+# Toolset（平台工具）
+# ---------------------------------------------------------------------------
+class ToolsetToggleRequest(BaseModel):
+    enabled: bool
+
+
+# ---------------------------------------------------------------------------
+# User
+# ---------------------------------------------------------------------------
+class UserCreate(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+
+
+class UserExpertAssign(BaseModel):
+    expert_ids: List[int] = []
+
+
+class UserLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserFeishuBindRequest(BaseModel):
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
 
 
 # ---------------------------------------------------------------------------

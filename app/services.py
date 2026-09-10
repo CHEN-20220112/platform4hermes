@@ -144,10 +144,11 @@ class ProfileRenderer:
 
         skills = list(expert.skills or [])
         mcp_servers = list(expert.mcp_servers or [])
+        plugins = list(expert.plugins or [])
 
         # 1. SOUL.md
         (local_dir / "SOUL.md").write_text(
-            self._render_soul(expert, skills), encoding="utf-8"
+            self._render_soul(expert, skills, plugins), encoding="utf-8"
         )
 
         # 2. config.yaml
@@ -181,7 +182,9 @@ class ProfileRenderer:
         }
 
     # ------------------------------------------------------------------
-    def _render_soul(self, expert: models.Expert, skills: list) -> str:
+    def _render_soul(self, expert: models.Expert, skills: list,
+                     plugins: Optional[list] = None) -> str:
+        plugins = plugins or []
         lines = [f"# {expert.name}", ""]
         if expert.system_prompt:
             lines += [expert.system_prompt.strip(), ""]
@@ -196,6 +199,12 @@ class ProfileRenderer:
                     "---",
                     "",
                 ]
+        if plugins:
+            lines += ["## 绑定的插件 (Plugins)", ""]
+            for p in plugins:
+                lines += [f"- {p.name} (v{p.version or '1.0.0'})"]
+                if p.description:
+                    lines += [f"  {p.description.strip()}"]
         return "\n".join(lines).strip() + "\n"
 
     def _render_skill_md(self, skill: models.Skill) -> str:
@@ -808,8 +817,9 @@ def render_expert(expert_id: int, db: Optional[Session] = None) -> dict:
             session.close()
 
 
-def render_affected_experts(skill_id: Optional[int] = None, mcp_id: Optional[int] = None) -> int:
-    """Skill / MCP 变更后，重渲染所有引用它的专家。返回重渲染数量。"""
+def render_affected_experts(skill_id: Optional[int] = None, mcp_id: Optional[int] = None,
+                            plugin_id: Optional[int] = None) -> int:
+    """Skill / MCP / Plugin 变更后，重渲染所有引用它的专家。返回重渲染数量。"""
     db = SessionLocal()
     count = 0
     try:
@@ -822,6 +832,10 @@ def render_affected_experts(skill_id: Optional[int] = None, mcp_id: Optional[int
             mcp = db.get(models.MCPServer, mcp_id)
             if mcp:
                 experts.extend(mcp.experts)
+        if plugin_id is not None:
+            plugin = db.get(models.Plugin, plugin_id)
+            if plugin:
+                experts.extend(plugin.experts)
         seen = set()
         with ProfileRenderer(db) as renderer:
             for expert in experts:

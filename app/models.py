@@ -1,4 +1,4 @@
-"""8 张表 + 2 张多对多关联表。"""
+"""10 张表 + 4 张多对多关联表。"""
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -10,6 +10,7 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    select,
 )
 from sqlalchemy.orm import relationship
 
@@ -36,6 +37,23 @@ expert_mcp_servers = Table(
     Base.metadata,
     Column("expert_id", Integer, ForeignKey("experts.id"), primary_key=True),
     Column("mcp_server_id", Integer, ForeignKey("mcp_servers.id"), primary_key=True),
+)
+
+user_experts = Table(
+    "user_experts",
+    Base.metadata,
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("expert_id", Integer, ForeignKey("experts.id"), primary_key=True),
+    # 每个「用户 × 专家」各自绑定一套飞书 App（模式 B：一专家一机器人）
+    Column("feishu_app_id", String(128), default=""),
+    Column("feishu_app_secret", String(256), default=""),
+)
+
+expert_plugins = Table(
+    "expert_plugins",
+    Base.metadata,
+    Column("expert_id", Integer, ForeignKey("experts.id"), primary_key=True),
+    Column("plugin_id", Integer, ForeignKey("plugins.id"), primary_key=True),
 )
 
 
@@ -73,6 +91,12 @@ class Expert(Base):
     )
     mcp_servers = relationship(
         "MCPServer", secondary=expert_mcp_servers, back_populates="experts", lazy="selectin"
+    )
+    users = relationship(
+        "User", secondary=user_experts, back_populates="experts", lazy="selectin"
+    )
+    plugins = relationship(
+        "Plugin", secondary=expert_plugins, back_populates="experts", lazy="selectin"
     )
 
 
@@ -129,6 +153,44 @@ class MCPServer(Base):
 
 
 # ---------------------------------------------------------------------------
+# 4c. Plugin 插件（由 hermes plugins CLI 管理：安装/扫描/启停/移除）
+# ---------------------------------------------------------------------------
+class Plugin(Base):
+    __tablename__ = "plugins"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    version = Column(String(32), default="1.0.0")
+    description = Column(Text, default="")
+    enabled = Column(Boolean, default=False)
+    source = Column(String(32), default="bundled")  # bundled | git | index | ""
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    experts = relationship(
+        "Expert", secondary=expert_plugins, back_populates="plugins", lazy="selectin"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4b. User 平台用户（管理员下发专家后，用户绑定自己的飞书 App 凭据）
+# ---------------------------------------------------------------------------
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(128), nullable=False)
+    email = Column(String(256), unique=True, nullable=False, index=True)
+    password_hash = Column(String(256), nullable=False)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    experts = relationship(
+        "Expert", secondary=user_experts, back_populates="users", lazy="selectin"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 5. FeishuApp 飞书 App（注册表）
 # ---------------------------------------------------------------------------
 class FeishuApp(Base):
@@ -171,3 +233,22 @@ class CallLog(Base):
     latency_ms = Column(Integer, default=0)
     status = Column(String(32), default="success")  # success | error
     created_at = Column(DateTime, default=utcnow, index=True)
+
+
+def get_user_expert_bindings(db, user_id: int) -> dict:
+    """返回 {expert_id: {"feishu_app_id": str, "feishu_app_secret": str}}，
+    即某用户在每个「用户 × 专家」关联上的飞书 App 凭据。"""
+    rows = db.execute(
+        select(
+            user_experts.c.expert_id,
+            user_experts.c.feishu_app_id,
+            user_experts.c.feishu_app_secret,
+        ).where(user_experts.c.user_id == user_id)
+    ).all()
+    return {
+        r.expert_id: {
+            "feishu_app_id": r.feishu_app_id or "",
+            "feishu_app_secret": r.feishu_app_secret or "",
+        }
+        for r in rows
+    }

@@ -143,8 +143,11 @@
   </header>
   <nav>
     <button class="tab active" data-tab="experts">专家管理</button>
+    <button class="tab" data-tab="users">用户管理</button>
     <button class="tab" data-tab="skills">Skill 管理</button>
     <button class="tab" data-tab="mcp">MCP 管理</button>
+    <button class="tab" data-tab="plugins">插件管理</button>
+    <button class="tab" data-tab="toolsets">工具管理</button>
     <button class="tab" data-tab="settings">平台设置</button>
     <button class="tab" data-tab="logs">调用日志</button>
   </nav>
@@ -159,8 +162,24 @@
           <button class="btn primary" onclick="openExpertModal()">+ 新建专家</button>
         </div>
         <table>
-          <thead><tr><th>ID</th><th>名称</th><th>Profile</th><th>模型</th><th>Skill</th><th>MCP</th><th>操作</th></tr></thead>
+          <thead><tr><th>ID</th><th>名称</th><th>Profile</th><th>模型</th><th>Skill</th><th>MCP</th><th>插件</th><th>操作</th></tr></thead>
           <tbody id="experts-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 用户管理 -->
+    <section id="section-users" class="section">
+      <div class="card">
+        <div class="toolbar">
+          <h2 style="margin:0">用户列表</h2>
+          <div class="spacer"></div>
+          <button class="btn primary" onclick="openUserModal()">+ 创建用户</button>
+        </div>
+        <div class="hint" style="margin-bottom:12px">用户登录门户：<code>/user.html</code>（用户用邮箱 + 密码登录，绑定自己的飞书 App ID/Secret）。</div>
+        <table>
+          <thead><tr><th>姓名</th><th>邮箱</th><th>专家</th><th>飞书</th><th>操作</th></tr></thead>
+          <tbody id="users-tbody"></tbody>
         </table>
       </div>
     </section>
@@ -191,6 +210,39 @@
         <table>
           <thead><tr><th>ID</th><th>名称</th><th>传输</th><th>配置模板</th><th>工具过滤</th><th>操作</th></tr></thead>
           <tbody id="mcp-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 插件管理 -->
+    <section id="section-plugins" class="section">
+      <div class="card">
+        <div class="toolbar">
+          <h2 style="margin:0">插件列表</h2>
+          <div class="spacer"></div>
+          <button class="btn" onclick="scanPlugins()">扫描</button>
+          <button class="btn primary" onclick="openInstallModal()">+ 安装插件</button>
+        </div>
+        <div class="hint" style="margin-bottom:12px">插件由 Hermes 管理：从 GitHub / Git 地址安装（owner/repo、owner/repo/subdir 或 https:// / git@）；在磁盘新增文件后点「扫描」载入新 manifest；仅可移除用户安装在 ~/.hermes/plugins 下的插件。</div>
+        <table>
+          <thead><tr><th>名称</th><th>版本</th><th>描述</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="plugins-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 平台工具 -->
+    <section id="section-toolsets" class="section">
+      <div class="card">
+        <div class="toolbar">
+          <h2 style="margin:0">平台工具（Hermes Toolsets）</h2>
+          <div class="spacer"></div>
+          <button class="btn" onclick="loadToolsets()">刷新</button>
+        </div>
+        <div class="hint" style="margin-bottom:12px">平台工具即 Hermes 的工具集，按平台（CLI / Feishu / Telegram 等）启用或禁用；数据来自 Hermes Dashboard（需在「平台设置」配置 Dashboard 地址与密码）。</div>
+        <table>
+          <thead><tr><th>名称</th><th>描述</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="toolsets-tbody"></tbody>
         </table>
       </div>
     </section>
@@ -382,7 +434,7 @@
 <script>
 const API = '/api';
 let TOKEN = localStorage.getItem('hermes_token') || '';
-let state = { experts: [], skills: [], mcps: [], logOffset: 0, logLimit: 50 };
+let state = { experts: [], skills: [], mcps: [], plugins: [], users: [], logOffset: 0, logLimit: 50 };
 
 function toast(msg, isErr) {
   const t = document.getElementById('toast');
@@ -509,11 +561,14 @@ document.querySelectorAll('nav .tab').forEach(t => {
     document.getElementById('section-' + t.dataset.tab).classList.add('active');
     if (t.dataset.tab === 'logs') loadLogs();
     if (t.dataset.tab === 'settings') loadSettings();
+    if (t.dataset.tab === 'users') loadUsers();
+    if (t.dataset.tab === 'plugins') loadPlugins();
+    if (t.dataset.tab === 'toolsets') loadToolsets();
   };
 });
 
 async function loadAll() {
-  await Promise.all([loadExperts(), loadSkills(), loadMcps()]);
+  await Promise.all([loadExperts(), loadSkills(), loadMcps(), loadPlugins()]);
 }
 
 // ---------- 专家 ----------
@@ -521,7 +576,7 @@ async function loadExperts() {
   try {
     state.experts = await api('/experts');
     const tb = document.getElementById('experts-tbody');
-    if (!state.experts.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">暂无专家，点击右上角新建</td></tr>'; return; }
+    if (!state.experts.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">暂无专家，点击右上角新建</td></tr>'; return; }
     tb.innerHTML = state.experts.map(e => `
       <tr>
         <td>${e.id}</td>
@@ -530,6 +585,7 @@ async function loadExperts() {
         <td class="mono">${esc(e.model)}</td>
         <td>${e.skills.map(s => `<span class="tag">${esc(s.name)}</span>`).join('') || '-'}</td>
         <td>${e.mcp_servers.map(m => `<span class="tag">${esc(m.name)}</span>`).join('') || '-'}</td>
+        <td>${e.plugins.map(p => `<span class="tag">${esc(p.name)}</span>`).join('') || '-'}</td>
         <td style="white-space:nowrap">
           <button class="btn small" onclick="openExpertModal(${e.id})">编辑</button>
           <button class="btn small" onclick="renderExpert(${e.id})">渲染下发</button>
@@ -591,6 +647,9 @@ function openExpertModal(id) {
     <div class="field"><label>绑定 MCP Server</label><div class="checkbox-list" id="mcp-checks">
       ${state.mcps.map(m => `<label><input type="checkbox" value="${m.id}" ${e && e.mcp_server_ids.includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`).join('') || '<span class="hint">暂无 MCP</span>'}
     </div></div>
+    <div class="field"><label>绑定插件</label><div class="checkbox-list" id="plugin-checks">
+      ${state.plugins.map(p => `<label><input type="checkbox" value="${p.id}" ${e && e.plugin_ids.includes(p.id) ? 'checked' : ''}>${esc(p.name)}</label>`).join('') || '<span class="hint">暂无插件</span>'}
+    </div></div>
   </div>
   <div class="modal-actions">
     <button class="btn" onclick="closeModal()">取消</button>
@@ -605,6 +664,7 @@ async function saveExpert(id) {
     system_prompt: val('f-prompt'), feishu_app_id: val('f-appid'), feishu_app_secret: val('f-appsecret'),
     skill_ids: checkedVals('#skill-checks input'),
     mcp_server_ids: checkedVals('#mcp-checks input'),
+    plugin_ids: checkedVals('#plugin-checks input'),
   };
   if (!form.name || !form.profile_name) return toast('名称和 Profile 名称为必填', true);
 
@@ -619,6 +679,7 @@ async function saveExpert(id) {
         system_prompt: orig.system_prompt, feishu_app_id: orig.feishu_app_id,
         feishu_app_secret: orig.feishu_app_secret,
         skill_ids: orig.skill_ids, mcp_server_ids: orig.mcp_server_ids,
+        plugin_ids: orig.plugin_ids,
       };
       payload = {};
       for (const k of Object.keys(form)) {
@@ -750,6 +811,189 @@ async function saveMcp(id) {
     toast(`已保存${r.re_rendered_experts != null ? `，重渲染 ${r.re_rendered_experts} 个专家` : ''}`);
     closeModal(); loadMcps();
   } catch (e) { toast(e.message, true); }
+}
+
+// ---------- 插件 ----------
+async function loadPlugins() {
+  try {
+    state.plugins = await api('/plugins');
+    const tb = document.getElementById('plugins-tbody');
+    if (!state.plugins.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">暂无插件，点击右上角「扫描」从磁盘载入插件清单</td></tr>'; return; }
+    tb.innerHTML = state.plugins.map(p => `
+      <tr>
+        <td><b>${esc(p.name)}</b></td>
+        <td>${esc(p.version)}</td>
+        <td style="max-width:360px;word-break:break-all">${esc(p.description) || '-'}</td>
+        <td><span class="tag">${esc(p.source || '-')}</span></td>
+        <td><span class="pill ${p.enabled ? 'ok' : 'err'}">${p.enabled ? '已启用' : '未启用'}</span></td>
+        <td style="white-space:nowrap">
+          ${p.enabled
+            ? `<button class="btn small" onclick="togglePlugin(${p.id}, false)">禁用</button>`
+            : `<button class="btn small" onclick="togglePlugin(${p.id}, true)">启用</button>`}
+          ${(p.source || '').toLowerCase() !== 'bundled'
+            ? `<button class="btn small danger" onclick="removePlugin(${p.id})">移除</button>`
+            : ''}
+        </td>
+      </tr>`).join('');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function scanPlugins() {
+  try {
+    const r = await api('/plugins/scan', 'POST');
+    toast(`扫描完成，共 ${r.count} 个插件`); loadPlugins();
+  } catch (e) { toast(e.message, true); }
+}
+
+function openInstallModal() {
+  openModalRaw(`<h3>从 GitHub / Git 地址安装</h3>
+    <div class="form-grid">
+      <div class="field full">
+        <label>Git 地址或 owner/repo</label>
+        <input id="f-source" placeholder="owner/repo, owner/repo/subdir, or https://...">
+        <div class="hint">使用 owner/repo 简写或完整的 https:// / git@ 克隆地址。</div>
+      </div>
+      <div class="field full">
+        <label><input type="checkbox" id="f-force" style="width:auto;margin-right:6px">强制重装（先删除已有目录）</label>
+      </div>
+      <div class="field full">
+        <label><input type="checkbox" id="f-enable" checked style="width:auto;margin-right:6px">安装后启用</label>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="installPlugin()">安装</button>
+    </div>`);
+}
+
+async function installPlugin() {
+  const source = val('f-source').trim();
+  if (!source) return toast('请填写 Git 地址或 owner/repo', true);
+  const body = {
+    source,
+    force: document.getElementById('f-force').checked,
+    enable: document.getElementById('f-enable').checked,
+  };
+  const btn = document.querySelector('#modal .btn.primary');
+  if (btn) { btn.disabled = true; btn.textContent = '安装中…'; }
+  try {
+    const r = await api('/plugins/install', 'POST', body);
+    toast('安装完成'); closeModal(); loadPlugins();
+  } catch (e) { if (btn) { btn.disabled = false; btn.textContent = '安装'; } toast(e.message, true); }
+}
+
+async function togglePlugin(id, enabled) {
+  try {
+    await api(`/plugins/${id}`, 'PUT', { enabled });
+    toast(enabled ? '已启用' : '已禁用'); loadPlugins();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function removePlugin(id) {
+  if (!confirm('确认移除该插件？将删除 ~/.hermes/plugins 下的对应目录。')) return;
+  try { await api(`/plugins/${id}`, 'DELETE'); toast('已移除'); loadPlugins(); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ---------- 平台工具 ----------
+async function loadToolsets() {
+  const tb = document.getElementById('toolsets-tbody');
+  tb.innerHTML = '<tr><td colspan="5" class="empty">加载中…</td></tr>';
+  try {
+    const items = await api('/platform-tools');
+    if (!items.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">暂无工具集</td></tr>'; return; }
+    tb.innerHTML = items.map(t => `
+      <tr>
+        <td><b>${esc(t.label || t.name)}</b><div class="mono hint">${esc(t.name)}</div></td>
+        <td style="max-width:340px;word-break:break-all" title="${esc((t.tools || []).join(', '))}">${esc(t.description || '-')}</td>
+        <td><span class="tag">${esc(t.platform_label || t.platform || '-')}</span></td>
+        <td><span class="pill ${t.enabled ? 'ok' : 'err'}">${t.enabled ? '已启用' : '未启用'}</span></td>
+        <td style="white-space:nowrap">
+          ${t.enabled
+            ? `<button class="btn small" onclick="toggleToolset('${esc(t.name)}', false)">禁用</button>`
+            : `<button class="btn small" onclick="toggleToolset('${esc(t.name)}', true)">启用</button>`}
+        </td>
+      </tr>`).join('');
+  } catch (e) { tb.innerHTML = '<tr><td colspan="5" class="empty">' + esc(e.message) + '</td></tr>'; toast(e.message, true); }
+}
+
+async function toggleToolset(name, enabled) {
+  try {
+    await api(`/platform-tools/${encodeURIComponent(name)}`, 'PUT', { enabled });
+    toast(enabled ? '已启用' : '已禁用'); loadToolsets();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- 用户 ----------
+async function loadUsers() {
+  try {
+    state.users = await api('/users');
+    const tb = document.getElementById('users-tbody');
+    if (!state.users.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">暂无用户，点击右上角创建</td></tr>'; return; }
+    tb.innerHTML = state.users.map(u => `
+      <tr>
+        <td><b>${esc(u.name)}</b></td>
+        <td>${esc(u.email)}</td>
+        <td>${u.experts.map(e => `<span class="tag">${esc(e.name)}</span>`).join('') || '-'}</td>
+        <td><span class="pill ${u.feishu_bound_count ? 'ok' : 'err'}">${u.feishu_bound_count ? '已绑定' : '未绑定'}</span></td>
+        <td style="white-space:nowrap">
+          <button class="btn small" onclick="openUserModal(${u.id})">编辑</button>
+          <button class="btn small" onclick="openAssignExpertModal(${u.id})">派遣专家</button>
+          <button class="btn small danger" onclick="delUser(${u.id})">删除</button>
+        </td>
+      </tr>`).join('');
+  } catch (e) { toast(e.message, true); }
+}
+
+function openUserModal(id) {
+  const u = id ? state.users.find(x => x.id === id) : null;
+  openModalRaw(`<h3>${u ? '编辑用户' : '创建用户'}</h3><div class="form-grid">
+    <div class="field"><label>姓名</label><input id="f-name" value="${u ? esc(u.name) : ''}"></div>
+    <div class="field"><label>邮箱</label><input id="f-email" value="${u ? esc(u.email) : ''}"></div>
+    <div class="field full"><label>密码${u ? '（留空则不修改）' : ''}</label><input id="f-password" type="password" placeholder="${u ? '••••••' : ''}"></div>
+  </div>
+  <div class="modal-actions">
+    <button class="btn" onclick="closeModal()">取消</button>
+    <button class="btn primary" onclick="saveUser(${u ? u.id : 'null'})">保存</button>
+  </div>`);
+}
+
+async function saveUser(id) {
+  const name = val('f-name'), email = val('f-email'), password = val('f-password');
+  if (!name || !email) return toast('姓名和邮箱为必填', true);
+  if (!id && !password) return toast('密码为必填', true);
+  const body = { name, email };
+  if (password) body.password = password;
+  try {
+    const r = id ? await api(`/users/${id}`, 'PUT', body) : await api('/users', 'POST', body);
+    toast('已保存'); closeModal(); loadUsers();
+  } catch (e) { toast(e.message, true); }
+}
+
+function openAssignExpertModal(id) {
+  const u = state.users.find(x => x.id === id);
+  if (!u) return;
+  const checks = state.experts.map(e => `<label><input type="checkbox" value="${e.id}" ${u.expert_ids.includes(e.id) ? 'checked' : ''}>${esc(e.name)}</label>`).join('') || '<span class="hint">暂无专家，请先到「专家管理」创建</span>';
+  openModalRaw(`<h3>派遣专家 — ${esc(u.name)}</h3>
+    <div class="field"><label>选择要分配给该用户的专家</label><div class="checkbox-list" id="expert-checks">${checks}</div></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="saveAssignExperts(${u.id})">保存</button>
+    </div>`);
+}
+
+async function saveAssignExperts(id) {
+  const expert_ids = checkedVals('#expert-checks input');
+  try {
+    await api(`/users/${id}/experts`, 'PUT', { expert_ids });
+    toast('已派遣专家'); closeModal(); loadUsers();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function delUser(id) {
+  if (!confirm('确认删除该用户？')) return;
+  try { await api(`/users/${id}`, 'DELETE'); toast('已删除'); loadUsers(); }
+  catch (e) { toast(e.message, true); }
 }
 
 // ---------- 设置 ----------

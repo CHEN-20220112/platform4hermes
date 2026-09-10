@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>用户门户 - Hermes 平台</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --border: #e3e6ea;
+    --text: #1f2329; --muted: #8a9099;
+    --primary: #3370ff; --primary-hover: #2859cc;
+    --danger: #e5484d; --ok: #30a46c;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--text); font-size: 14px; }
+  button { cursor: pointer; font-family: inherit; }
+  input { font-family: inherit; font-size: 14px; }
+
+  #login-view { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .login-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+                padding: 40px 36px; width: 380px; box-shadow: 0 8px 30px rgba(0,0,0,.06); }
+  .login-card h1 { font-size: 20px; margin: 0 0 4px; }
+  .login-card .sub { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+  .login-card label { display: block; margin: 14px 0 6px; color: var(--muted); font-size: 13px; }
+  .login-card input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+  .login-card input:focus { outline: none; border-color: var(--primary); }
+  .login-card .btn { width: 100%; margin-top: 22px; }
+
+  header { background: var(--card); border-bottom: 1px solid var(--border); padding: 0 24px;
+           display: flex; align-items: center; height: 56px; position: sticky; top: 0; z-index: 10; }
+  header .logo { font-weight: 700; font-size: 16px; }
+  header .spacer { flex: 1; }
+  header .user { color: var(--muted); margin-right: 16px; }
+
+  main { padding: 24px; max-width: 960px; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+          padding: 20px; margin-bottom: 20px; }
+  .card h2 { margin: 0 0 16px; font-size: 16px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+  tr:hover td { background: #fafbfc; }
+  .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+  .ellipsis { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; }
+  .pill.ok { background: #e6f4ea; color: var(--ok); }
+  .pill.err { background: #fdebec; color: var(--danger); }
+  .empty { color: var(--muted); text-align: center; padding: 24px 0; }
+
+  .btn { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: #fff; color: var(--text); }
+  .btn:hover { border-color: #cfd4da; }
+  .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .btn.primary:hover { background: var(--primary-hover); }
+  .btn.small { padding: 4px 10px; font-size: 12px; }
+
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
+  .field input { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; }
+  .field input:focus { outline: none; border-color: var(--primary); }
+  .field.full { grid-column: 1 / -1; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+
+  #modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 100;
+                   align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; }
+  #modal-overlay.open { display: flex; }
+  #modal { background: #fff; border-radius: 12px; width: 560px; max-width: 100%; padding: 24px; }
+  #modal h3 { margin: 0 0 20px; font-size: 18px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+  .toast { position: fixed; bottom: 24px; right: 24px; background: #1f2329; color: #fff; padding: 12px 18px;
+           border-radius: 8px; z-index: 200; opacity: 0; transform: translateY(8px); transition: all .2s; }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.err { background: var(--danger); }
+</style>
+</head>
+<body>
+
+<!-- ===================== 登录 ===================== -->
+<div id="login-view">
+  <div class="login-card">
+    <h1>Hermes 用户门户</h1>
+    <p class="sub">登录后为每个专家绑定各自的飞书 App，与专属专家互动</p>
+    <label>邮箱</label>
+    <input id="login-email" placeholder="you@example.com" autocomplete="username">
+    <label>密码</label>
+    <input id="login-password" type="password" placeholder="••••••" autocomplete="current-password">
+    <button class="btn primary" id="login-btn" onclick="doLogin()">登 录</button>
+    <div class="hint" style="text-align:center;margin-top:14px">没有账号？请联系管理员创建</div>
+  </div>
+</div>
+
+<!-- ===================== 门户 ===================== -->
+<div id="portal-view" style="display:none">
+  <header>
+    <div class="logo">Hermes 用户门户</div>
+    <div class="spacer"></div>
+    <span class="user" id="header-user"></span>
+    <button class="btn small" onclick="doLogout()">退出</button>
+  </header>
+  <main>
+    <div class="card">
+      <h2>专家列表（全部）</h2>
+      <table>
+        <thead><tr><th>专家</th><th>描述</th><th>模型</th><th>操作</th></tr></thead>
+        <tbody id="catalog-tbody"></tbody>
+      </table>
+      <div class="hint" style="margin-top:10px">展示平台全部专家；点「召唤」即可把专家添加到你的「我的专家」。</div>
+    </div>
+
+    <div class="card">
+      <h2>我的专家</h2>
+      <table>
+        <thead><tr><th>专家</th><th>Profile</th><th>模型</th><th>飞书 App</th><th>操作</th></tr></thead>
+        <tbody id="experts-tbody"></tbody>
+      </table>
+      <div class="hint" style="margin-top:10px">专家可由管理员分配，也可从上方专家列表召唤；每个专家可绑定一套不同的飞书 App。</div>
+    </div>
+  </main>
+</div>
+
+<!-- ===================== 绑定弹窗 ===================== -->
+<div id="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div id="modal"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '/api';
+let TOKEN = localStorage.getItem('hermes_user_token') || '';
+let state = { user: null, catalog: [] };
+
+function toast(msg, isErr) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.className = 'toast', 2500);
+}
+
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function val(id) { return document.getElementById(id).value; }
+function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v ?? ''; }
+function openModal(html) { document.getElementById('modal').innerHTML = html; document.getElementById('modal-overlay').classList.add('open'); }
+function closeModal() { document.getElementById('modal-overlay').classList.remove('open'); }
+
+async function api(path, method = 'GET', body) {
+  const opts = { method, headers: {} };
+  if (TOKEN) opts.headers['Authorization'] = 'Bearer ' + TOKEN;
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(API + path, opts);
+  if (res.status === 401) { doLogout(); throw new Error('未登录'); }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+function render(user) {
+  state.user = user;
+  document.getElementById('header-user').textContent = user.name + '（' + user.email + '）';
+
+  const tb = document.getElementById('experts-tbody');
+  if (!user.experts.length) {
+    tb.innerHTML = '<tr><td colspan="5" class="empty">暂无专家，请从上方专家列表召唤，或联系管理员分配</td></tr>';
+    return;
+  }
+  tb.innerHTML = user.experts.map(e => `
+    <tr>
+      <td><b>${esc(e.name)}</b></td>
+      <td class="mono">${esc(e.profile_name)}</td>
+      <td class="mono">${esc(e.model)}</td>
+      <td>
+        ${e.has_feishu_bound
+          ? `<span class="pill ok">已绑定</span><div class="mono hint">${esc(e.feishu_app_id)}</div>`
+          : '<span class="pill err">未绑定</span>'}
+      </td>
+      <td style="white-space:nowrap">
+        <button class="btn small" onclick="openBindModal(${e.id})">${e.has_feishu_bound ? '重新绑定' : '绑定飞书'}</button>
+      </td>
+    </tr>`).join('');
+}
+
+function showPortal(user) {
+  document.getElementById('login-view').style.display = 'none';
+  document.getElementById('portal-view').style.display = 'block';
+  render(user);
+  loadCatalog();
+}
+
+async function doLogin() {
+  const email = val('login-email').trim();
+  const password = val('login-password');
+  if (!email || !password) return toast('请输入邮箱和密码', true);
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true; btn.textContent = '登录中…';
+  try {
+    const r = await api('/user-auth/login', 'POST', { email, password });
+    TOKEN = r.token;
+    localStorage.setItem('hermes_user_token', TOKEN);
+    showPortal(r.user);
+    toast('登录成功');
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; btn.textContent = '登 录'; }
+}
+
+function openBindModal(expertId) {
+  const e = (state.user.experts || []).find(x => x.id === expertId);
+  if (!e) return;
+  openModal(`<h3>绑定飞书 App — ${esc(e.name)}</h3>
+    <div class="form-grid">
+      <div class="field full"><label>飞书 App ID</label><input id="f-app-id" value="${esc(e.feishu_app_id)}" placeholder="cli_xxxxxxxx"></div>
+      <div class="field full"><label>飞书 App Secret</label><input id="f-app-secret" type="password" value="${esc(e.feishu_app_secret)}" placeholder="App Secret"></div>
+    </div>
+    <div class="hint">App ID / App Secret 可在飞书开放平台「开发者后台 → 应用凭证」中查看。</div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="saveBind(${e.id})">保存绑定</button>
+    </div>`);
+}
+
+async function saveBind(expertId) {
+  const feishu_app_id = val('f-app-id').trim();
+  const feishu_app_secret = val('f-app-secret').trim();
+  if (!feishu_app_id || !feishu_app_secret) return toast('请填写 App ID 和 App Secret', true);
+  try {
+    const r = await api(`/user-auth/experts/${expertId}/feishu`, 'PUT', { feishu_app_id, feishu_app_secret });
+    render(r.user);
+    closeModal();
+    toast('飞书绑定已保存');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadCatalog() {
+  try {
+    state.catalog = await api('/user-auth/catalog');
+    renderCatalog();
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderCatalog() {
+  const tb = document.getElementById('catalog-tbody');
+  const items = state.catalog || [];
+  if (!items.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">暂无专家</td></tr>'; return; }
+  tb.innerHTML = items.map(e => `
+    <tr>
+      <td><b>${esc(e.name)}</b></td>
+      <td><div class="ellipsis" title="${esc(e.system_prompt)}">${esc(e.system_prompt) || '-'}</div></td>
+      <td class="mono">${esc(e.model)}</td>
+      <td style="white-space:nowrap">
+        <button class="btn small" onclick="viewExpert(${e.id})">查看</button>
+        ${e.added
+          ? '<span class="pill ok">已添加</span>'
+          : `<button class="btn small primary" onclick="summonExpert(${e.id})">召唤</button>`}
+      </td>
+    </tr>`).join('');
+}
+
+async function summonExpert(expertId) {
+  try {
+    const r = await api(`/user-auth/catalog/${expertId}/summon`, 'POST');
+    render(r.user);
+    toast(r.already ? '该专家已在你的列表中' : '已召唤到我的专家');
+    await loadCatalog();
+  } catch (e) { toast(e.message, true); }
+}
+
+function viewExpert(expertId) {
+  const e = (state.catalog || []).find(x => x.id === expertId);
+  if (!e) return;
+  openModal(`<h3>专家详情 — ${esc(e.name)}</h3>
+    <div class="form-grid">
+      <div class="field"><label>名称</label><div>${esc(e.name)}</div></div>
+      <div class="field"><label>Profile</label><div class="mono">${esc(e.profile_name)}</div></div>
+      <div class="field"><label>模型</label><div class="mono">${esc(e.model)}</div></div>
+      <div class="field"><label>状态</label><div>${e.added ? '<span class="pill ok">已添加</span>' : '<span class="pill err">未添加</span>'}</div></div>
+      <div class="field full"><label>系统提示词</label><div style="background:#f6f8fa;border:1px solid var(--border);border-radius:8px;padding:12px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;font-size:13px">${esc(e.system_prompt || '（无）')}</div></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">关闭</button>
+      ${e.added ? '' : `<button class="btn primary" onclick="closeModal();summonExpert(${e.id})">召唤</button>`}
+    </div>`);
+}
+
+function doLogout() {
+  TOKEN = '';
+  localStorage.removeItem('hermes_user_token');
+  location.reload();
+}
+
+document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+// 初始化：已有 token 则直接进门户
+if (TOKEN) {
+  api('/user-auth/me')
+    .then(user => showPortal(user))
+    .catch(() => { TOKEN = ''; localStorage.removeItem('hermes_user_token'); });
+}
+</script>
+</body>
+</html>

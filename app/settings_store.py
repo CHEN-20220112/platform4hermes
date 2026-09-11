@@ -16,7 +16,7 @@ DEFAULTS = {
     "feishu_app_secret": "",
     "feishu_mode": "A",              # A = 单机器人路由；B = 一专家一机器人
     "deepseek_api_key": "",          # 可选：渲染进 profile config.yaml 供 Hermes 使用
-    "default_model": "upstage/solar-pro4:free",
+    "default_model": "Anthropic/Opus5",
     # Hermes profiles 根目录；留空 = 自动探测（%LOCALAPPDATA%\hermes\profiles 或 ~/.hermes/profiles）
     "hermes_profiles_dir": "",
     # Hermes 运行目标：

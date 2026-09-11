@@ -41,6 +41,7 @@ class MCPServerCreate(BaseModel):
     transport: str = "http"  # http | stdio
     config_template: str = "{}"  # JSON
     tools_filter: str = "[]"  # JSON array
+    category: str = ""  # 分类
 
 
 class MCPServerUpdate(BaseModel):
@@ -48,6 +49,7 @@ class MCPServerUpdate(BaseModel):
     transport: Optional[str] = None
     config_template: Optional[str] = None
     tools_filter: Optional[str] = None
+    category: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +59,7 @@ class ExpertCreate(BaseModel):
     name: str
     system_prompt: str = ""
     profile_name: str
-    model: str = "upstage/solar-pro4:free"
+    model: str = "Anthropic/Opus5"
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
     skill_ids: List[int] = []
@@ -141,6 +143,27 @@ class UserLoginRequest(BaseModel):
 class UserFeishuBindRequest(BaseModel):
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Connector（应用市场 / 连接器）
+# ---------------------------------------------------------------------------
+class ConnectorCreate(BaseModel):
+    name: str
+    icon: str = ""
+    category: str = ""
+    description: str = ""
+    config: str = "{}"  # JSON
+    enabled: bool = False
+
+
+class ConnectorUpdate(BaseModel):
+    name: Optional[str] = None
+    icon: Optional[str] = None
+    category: Optional[str] = None
+    description: Optional[str] = None
+    config: Optional[str] = None
+    enabled: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------

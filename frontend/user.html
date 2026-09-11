@@ -55,6 +55,7 @@
   .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
   .btn.primary:hover { background: var(--primary-hover); }
   .btn.small { padding: 4px 10px; font-size: 12px; }
+  .btn.danger { color: var(--danger); border-color: #f2c3c5; }
 
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   .field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
@@ -186,6 +187,7 @@ function render(user) {
       </td>
       <td style="white-space:nowrap">
         <button class="btn small" onclick="openBindModal(${e.id})">${e.has_feishu_bound ? '重新绑定' : '绑定飞书'}</button>
+        <button class="btn small danger" onclick="removeExpert(${e.id})">移除</button>
       </td>
     </tr>`).join('');
 }
@@ -272,6 +274,18 @@ async function summonExpert(expertId) {
     toast(r.already ? '该专家已在你的列表中' : '已召唤到我的专家');
     await loadCatalog();
   } catch (e) { toast(e.message, true); }
+}
+
+async function removeExpert(expertId) {
+  const e = (state.user.experts || []).find(x => x.id === expertId);
+  if (!e) return;
+  if (!confirm(`确认从「我的专家」移除「${e.name}」？其飞书绑定也会一并清除。`)) return;
+  try {
+    const r = await api(`/user-auth/experts/${expertId}`, 'DELETE');
+    render(r.user);
+    toast('已移除');
+    await loadCatalog();
+  } catch (err) { toast(err.message, true); }
 }
 
 function viewExpert(expertId) {

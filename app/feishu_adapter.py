@@ -239,7 +239,7 @@ class _FeishuBot:
         # 独立线程处理，避免阻塞 WS 事件循环（否则心跳超时 → 断线重连 → 重投递）
         threading.Thread(
             target=self.adapter.handle_message,
-            args=(open_id, text.strip(), message_id, self.expert_id, self),
+            args=(open_id, text.strip(), message_id, self.expert_id, self, chat_id),
             daemon=True,
             name=f"feishu-task-{message_id[:12] if message_id else 'noid'}",
         ).start()
@@ -708,7 +708,7 @@ class FeishuAdapter:
             return True
         return False
 
-    def handle_message(self, open_id, text, message_id, bot_expert_id=None, bot=None):
+    def handle_message(self, open_id, text, message_id, bot_expert_id=None, bot=None, chat_id=""):
         db = self._db()
         try:
             lowered = text.strip().lower()
@@ -740,7 +740,7 @@ class FeishuAdapter:
                     self._reply_text(bot, message_id, "专家不存在")
                     return
                 conv = self._ensure_conversation(db, open_id, bot_expert_id)
-                self._run_task(db, bot, expert, text, open_id, message_id, conv)
+                self._run_task(db, bot, expert, text, open_id, message_id, conv, chat_id)
                 return
 
             # 模式 A：数字 = 选择专家（恢复/新建该专家的会话）
@@ -763,7 +763,7 @@ class FeishuAdapter:
                 self._send_select_card(db, bot, open_id, message_id)
                 return
             conv = self._ensure_conversation(db, open_id, expert.id)
-            self._run_task(db, bot, expert, text, open_id, message_id, conv)
+            self._run_task(db, bot, expert, text, open_id, message_id, conv, chat_id)
         finally:
             db.close()
 
@@ -866,7 +866,7 @@ class FeishuAdapter:
     # ------------------------------------------------------------------
     # 执行任务 + 进度卡片
     # ------------------------------------------------------------------
-    def _run_task(self, db, bot, expert, text, open_id, message_id, conv=None):
+    def _run_task(self, db, bot, expert, text, open_id, message_id, conv=None, chat_id=""):
         if conv is None:
             conv = self._ensure_conversation(db, open_id, expert.id)
         # 会话标题：首条消息摘要（仅当尚未设置）
@@ -891,10 +891,17 @@ class FeishuAdapter:
                 bot.patch_card(card_msg_id, self._progress_card("⚙️ 处理中…", detail))
 
         # 3. 调 HermesExecutor（携带会话 session_key）
+        # 把当前飞书 chat_id 注入消息，让 Hermes 出课脚本用 --to 把进度卡发回本会话。
+        task_text = text
+        if chat_id:
+            task_text = (
+                f"{text}\n\n[系统] 本会话飞书 chat_id = {chat_id}。"
+                f"出课脚本必须加 --to {chat_id}，进度卡片才会发到当前飞书会话。"
+            )
         try:
             with HermesExecutor(db) as executor:
                 result = executor.run(
-                    expert, text, open_id=open_id, channel="feishu",
+                    expert, task_text, open_id=open_id, channel="feishu",
                     session_id=conv.session_key,
                     on_progress=on_progress,
                 )

@@ -96,6 +96,22 @@ def bind_expert_feishu(expert_id: int, payload: UserFeishuBindRequest,
     return {"user": _user_me(user, db)}
 
 
+@router.delete("/experts/{expert_id}")
+def remove_expert(expert_id: int, user: models.User = Depends(get_current_user),
+                  db: Session = Depends(get_db)):
+    """用户自行把某个专家从「我的专家」移除（其飞书绑定一并清除）。"""
+    if not any(e.id == expert_id for e in user.experts):
+        raise HTTPException(status_code=404, detail="该专家不在你的列表中")
+
+    db.execute(
+        models.user_experts.delete()
+        .where(models.user_experts.c.user_id == user.id,
+               models.user_experts.c.expert_id == expert_id)
+    )
+    db.commit()
+    return {"user": _user_me(user, db)}
+
+
 @router.get("/catalog")
 def catalog(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     """平台全部专家列表（含是否已添加到当前用户的「我的专家」）。"""

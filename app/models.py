@@ -1,4 +1,4 @@
-"""10 张表 + 4 张多对多关联表。"""
+"""11 张表 + 4 张多对多关联表。"""
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -79,7 +79,7 @@ class Expert(Base):
     name = Column(String(128), nullable=False)
     system_prompt = Column(Text, default="")
     profile_name = Column(String(128), unique=True, nullable=False, index=True)
-    model = Column(String(128), default="upstage/solar-pro4:free")
+    model = Column(String(128), default="Anthropic/Opus5")
     # 模式 B（一专家一机器人）时使用的独立飞书 App 凭据
     feishu_app_id = Column(String(128), default="")
     feishu_app_secret = Column(String(256), default="")
@@ -146,6 +146,7 @@ class MCPServer(Base):
     transport = Column(String(16), default="http")  # http | stdio
     config_template = Column(Text, default="{}")  # JSON
     tools_filter = Column(Text, default="[]")  # JSON array 或逗号分隔
+    category = Column(String(64), default="")  # 分类
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -201,6 +202,23 @@ class FeishuApp(Base):
     app_name = Column(String(128), default="")
     mode = Column(String(8), default="A")  # A | B
     enabled = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# 5b. Connector 连接器（应用市场）
+# ---------------------------------------------------------------------------
+class Connector(Base):
+    __tablename__ = "connectors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    icon = Column(String(32), default="")      # 图标（emoji）
+    category = Column(String(64), default="")  # 分类
+    description = Column(Text, default="")
+    enabled = Column(Boolean, default=False)
+    config = Column(Text, default="{}")        # JSON 配置模板（凭据等）
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 

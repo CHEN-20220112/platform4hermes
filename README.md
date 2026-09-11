@@ -16,7 +16,7 @@ d:\platform4hermes\
 ├── app\
 │   ├── main.py              # FastAPI 入口 + startup（init_db + seed + 飞书自动启动）
 │   ├── database.py          # SQLAlchemy engine + SessionLocal + Base
-│   ├── models.py            # 10 张表 + 4 张多对多关联表
+│   ├── models.py            # 11 张表 + 4 张多对多关联表
 │   ├── settings_store.py    # DEFAULTS + get/update settings
 │   ├── schemas.py           # Pydantic 请求模型
 │   ├── services.py          # ProfileRenderer + HermesExecutor
@@ -31,10 +31,11 @@ d:\platform4hermes\
 │       ├── mcp_servers.py   # MCP Server CRUD
 │       ├── plugins.py       # 插件管理（委托 hermes plugins：扫描/安装/启停/移除）
 │       ├── platform_tools.py # 平台工具（Hermes toolsets 列表/启停，走 Dashboard API）
+│       ├── connectors.py    # 应用市场 / 连接器 CRUD + 启停
 │       ├── feishu.py        # 飞书 App 注册表 + 连接启停
 │       └── settings.py      # 平台设置 + Hermes 连接测试 + 审计日志
 ├── frontend\
-│   ├── index.html           # 管理员单页前端（登录 + 专家/用户/Skill/MCP/插件/工具/设置/日志）
+│   ├── index.html           # 管理员单页前端（登录 + 专家/用户/Skill/MCP/插件/工具/应用市场/设置/日志）
 │   └── user.html            # 用户门户（邮箱登录 + 我的专家 + 绑定飞书 App）
 ├── data\                    # 运行时自动创建（hermes.db + profiles/）
 └── requirements.txt

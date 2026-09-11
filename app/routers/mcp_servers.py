@@ -19,6 +19,7 @@ def _to_dict(m: models.MCPServer) -> dict:
         "transport": m.transport,
         "config_template": m.config_template or "{}",
         "tools_filter": m.tools_filter or "[]",
+        "category": m.category or "",
         "created_at": m.created_at.isoformat() if m.created_at else "",
         "updated_at": m.updated_at.isoformat() if m.updated_at else "",
     }

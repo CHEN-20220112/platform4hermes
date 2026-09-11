@@ -74,6 +74,7 @@
 
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   .form-grid .full { grid-column: 1 / -1; }
+  .field { display: flex; flex-direction: column; }
   .field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; }
   .field input, .field textarea, .field select { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; }
   .field textarea { min-height: 90px; resize: vertical; }
@@ -81,9 +82,10 @@
   .field input:focus, .field textarea:focus, .field select:focus { outline: none; border-color: var(--primary); }
   .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
-  .checkbox-list { max-height: 180px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
-  .checkbox-list label { display: block; padding: 4px 0; }
+  .checkbox-list { flex: 1 1 auto; max-height: 180px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+  .checkbox-list label { display: block; padding: 4px 0; cursor: pointer; }
   .checkbox-list input { margin-right: 8px; }
+  .filter-select { margin-bottom: 8px; }
 
   /* Modal */
   #modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 100;
@@ -148,6 +150,7 @@
     <button class="tab" data-tab="mcp">MCP 管理</button>
     <button class="tab" data-tab="plugins">插件管理</button>
     <button class="tab" data-tab="toolsets">工具管理</button>
+    <button class="tab" data-tab="connectors">应用市场</button>
     <button class="tab" data-tab="settings">平台设置</button>
     <button class="tab" data-tab="logs">调用日志</button>
   </nav>
@@ -208,7 +211,7 @@
           <button class="btn primary" onclick="openMcpModal()">+ 新建 MCP Server</button>
         </div>
         <table>
-          <thead><tr><th>ID</th><th>名称</th><th>传输</th><th>配置模板</th><th>工具过滤</th><th>操作</th></tr></thead>
+          <thead><tr><th>ID</th><th>名称</th><th>分类</th><th>传输</th><th>配置模板</th><th>工具过滤</th><th>操作</th></tr></thead>
           <tbody id="mcp-tbody"></tbody>
         </table>
       </div>
@@ -243,6 +246,22 @@
         <table>
           <thead><tr><th>名称</th><th>描述</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
           <tbody id="toolsets-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 应用市场 -->
+    <section id="section-connectors" class="section">
+      <div class="card">
+        <div class="toolbar">
+          <h2 style="margin:0">应用市场</h2>
+          <div class="spacer"></div>
+          <button class="btn primary" onclick="openConnectorModal()">+ 新建连接器</button>
+        </div>
+        <div class="hint" style="margin-bottom:12px">管理平台可接入的第三方连接器（企业微信、飞书、钉钉等）。</div>
+        <table>
+          <thead><tr><th>连接器</th><th>分类</th><th>描述</th><th>配置</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="connectors-tbody"></tbody>
         </table>
       </div>
     </section>
@@ -373,7 +392,7 @@
           </div>
           <div class="field">
             <label>默认模型 / DeepSeek Key</label>
-            <input id="set-default-model" placeholder="upstage/solar-pro4:free">
+            <input id="set-default-model" placeholder="Anthropic/Opus5">
             <input id="set-deepseek-key" placeholder="DeepSeek API Key（可选，透传给 Hermes）" style="margin-top:8px">
           </div>
         </div>
@@ -434,7 +453,7 @@
 <script>
 const API = '/api';
 let TOKEN = localStorage.getItem('hermes_token') || '';
-let state = { experts: [], skills: [], mcps: [], plugins: [], users: [], logOffset: 0, logLimit: 50 };
+let state = { experts: [], skills: [], mcps: [], plugins: [], users: [], connectors: [], logOffset: 0, logLimit: 50 };
 
 function toast(msg, isErr) {
   const t = document.getElementById('toast');
@@ -564,6 +583,7 @@ document.querySelectorAll('nav .tab').forEach(t => {
     if (t.dataset.tab === 'users') loadUsers();
     if (t.dataset.tab === 'plugins') loadPlugins();
     if (t.dataset.tab === 'toolsets') loadToolsets();
+    if (t.dataset.tab === 'connectors') loadConnectors();
   };
 });
 
@@ -633,38 +653,127 @@ async function delExpert(id) {
 
 function openExpertModal(id) {
   const e = id ? state.experts.find(x => x.id === id) : null;
+  skillFilter = '全部';
+  mcpFilter = '全部';
+  const rawModel = (e ? (e.model || '') : 'Anthropic/Opus5').trim() || 'Anthropic/Opus5';
+  const slash = rawModel.indexOf('/');
+  const provider = slash >= 0 ? rawModel.slice(0, slash) : 'Anthropic';
+  const modelName = slash >= 0 ? rawModel.slice(slash + 1) : rawModel;
   let html = `<h3>${e ? '编辑专家' : '新建专家'}</h3><div class="form-grid">
     <div class="field"><label>名称</label><input id="f-name" value="${e ? esc(e.name) : ''}"></div>
     <div class="field"><label>Profile 名称（唯一）</label><input id="f-profile" value="${e ? esc(e.profile_name) : ''}"></div>
-    <div class="field"><label>模型</label><input id="f-model" value="${e ? esc(e.model) : 'upstage/solar-pro4:free'}"><div class="hint">免费档模型例如 upstage/solar-pro4:free、stepfun/step-3.7-flash:free；模型 ID 写错会导致专家“无回复”</div></div>
+    <div class="field"><label>模型供应商</label><input id="f-provider" value="${esc(provider)}" placeholder="Anthropic"></div>
+    <div class="field"><label>模型</label><input id="f-model" value="${esc(modelName)}" placeholder="Opus5"></div>
     <div class="field"><label>飞书 App ID（模式 B）</label><input id="f-appid" value="${e ? esc(e.feishu_app_id) : ''}"></div>
     <div class="field"><label>飞书 App Secret（模式 B）</label><input id="f-appsecret" type="password" value="${e ? esc(e.feishu_app_secret) : ''}"></div>
+    <div class="field full"><div class="hint">创建飞书机器人：<a href="https://open.feishu.cn/page/launcher?from=backend_oneclick" target="_blank" rel="noopener">https://open.feishu.cn/page/launcher?from=backend_oneclick</a></div></div>
     <div class="field full"><label>系统提示词（System Prompt）</label>
       <textarea id="f-prompt" class="tall">${e ? esc(e.system_prompt) : ''}</textarea></div>
-    <div class="field"><label>绑定 Skill</label><div class="checkbox-list" id="skill-checks">
-      ${state.skills.map(s => `<label><input type="checkbox" value="${s.id}" ${e && e.skill_ids.includes(s.id) ? 'checked' : ''}>${esc(s.name)}</label>`).join('') || '<span class="hint">暂无 Skill</span>'}
-    </div></div>
-    <div class="field"><label>绑定 MCP Server</label><div class="checkbox-list" id="mcp-checks">
-      ${state.mcps.map(m => `<label><input type="checkbox" value="${m.id}" ${e && e.mcp_server_ids.includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`).join('') || '<span class="hint">暂无 MCP</span>'}
-    </div></div>
-    <div class="field"><label>绑定插件</label><div class="checkbox-list" id="plugin-checks">
-      ${state.plugins.map(p => `<label><input type="checkbox" value="${p.id}" ${e && e.plugin_ids.includes(p.id) ? 'checked' : ''}>${esc(p.name)}</label>`).join('') || '<span class="hint">暂无插件</span>'}
-    </div></div>
+    <div class="field"><label>绑定 Skill</label>
+      <select id="skill-filter" class="filter-select" onchange="setSkillFilter(this.value)"></select>
+      <div class="checkbox-list" id="skill-checks"></div>
+    </div>
+    <div class="field"><label>绑定 MCP Server</label>
+      <select id="mcp-filter" class="filter-select" onchange="setMcpFilter(this.value)"></select>
+      <div class="checkbox-list" id="mcp-checks"></div>
+    </div>
   </div>
   <div class="modal-actions">
     <button class="btn" onclick="closeModal()">取消</button>
     <button class="btn primary" onclick="saveExpert(${e ? e.id : 'null'})">保存并渲染下发</button>
   </div>`;
   openModalRaw(html);
+  renderSkillFilter();
+  renderSkillChecks(e);
+  renderMcpFilter();
+  renderMcpChecks(e);
+}
+
+// ---------- Skill / MCP 筛选 ----------
+let skillFilter = '全部';
+let mcpFilter = '全部';
+
+function getCategories(items) {
+  const cats = [];
+  const seen = new Set();
+  (items || []).forEach(s => {
+    const c = (s.category || '').trim() || '未分类';
+    if (!seen.has(c)) { seen.add(c); cats.push(c); }
+  });
+  return cats;
+}
+
+function renderSkillFilter() {
+  const el = document.getElementById('skill-filter');
+  if (!el) return;
+  el.innerHTML = ['全部', ...getCategories(state.skills)].map(c =>
+    `<option value="${esc(c)}" ${skillFilter === c ? 'selected' : ''}>${esc(c)}</option>`
+  ).join('');
+}
+
+function renderSkillChecks(expert) {
+  const el = document.getElementById('skill-checks');
+  if (!el) return;
+  const checked = expert ? (expert.skill_ids || []) : [];
+  el.innerHTML = (state.skills || []).map(s => {
+    const c = (s.category || '').trim() || '未分类';
+    return `<label data-cat="${esc(c)}"><input type="checkbox" value="${s.id}" ${checked.includes(s.id) ? 'checked' : ''}>${esc(s.name)}</label>`;
+  }).join('') || '<span class="hint">暂无 Skill</span>';
+  applySkillFilter();
+}
+
+function applySkillFilter() {
+  document.querySelectorAll('#skill-checks label[data-cat]').forEach(l => {
+    const c = l.getAttribute('data-cat');
+    l.style.display = (skillFilter === '全部' || c === skillFilter) ? '' : 'none';
+  });
+}
+
+function setSkillFilter(cat) {
+  skillFilter = cat;
+  applySkillFilter();
+}
+
+function renderMcpFilter() {
+  const el = document.getElementById('mcp-filter');
+  if (!el) return;
+  el.innerHTML = ['全部', ...getCategories(state.mcps)].map(c =>
+    `<option value="${esc(c)}" ${mcpFilter === c ? 'selected' : ''}>${esc(c)}</option>`
+  ).join('');
+}
+
+function renderMcpChecks(expert) {
+  const el = document.getElementById('mcp-checks');
+  if (!el) return;
+  const checked = expert ? (expert.mcp_server_ids || []) : [];
+  el.innerHTML = (state.mcps || []).map(m => {
+    const c = (m.category || '').trim() || '未分类';
+    return `<label data-cat="${esc(c)}"><input type="checkbox" value="${m.id}" ${checked.includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`;
+  }).join('') || '<span class="hint">暂无 MCP</span>';
+  applyMcpFilter();
+}
+
+function applyMcpFilter() {
+  document.querySelectorAll('#mcp-checks label[data-cat]').forEach(l => {
+    const c = l.getAttribute('data-cat');
+    l.style.display = (mcpFilter === '全部' || c === mcpFilter) ? '' : 'none';
+  });
+}
+
+function setMcpFilter(cat) {
+  mcpFilter = cat;
+  applyMcpFilter();
 }
 
 async function saveExpert(id) {
+  const provider = val('f-provider').trim();
+  const modelName = val('f-model').trim();
   const form = {
-    name: val('f-name'), profile_name: val('f-profile'), model: val('f-model'),
+    name: val('f-name'), profile_name: val('f-profile'),
+    model: [provider, modelName].filter(Boolean).join('/'),
     system_prompt: val('f-prompt'), feishu_app_id: val('f-appid'), feishu_app_secret: val('f-appsecret'),
     skill_ids: checkedVals('#skill-checks input'),
     mcp_server_ids: checkedVals('#mcp-checks input'),
-    plugin_ids: checkedVals('#plugin-checks input'),
   };
   if (!form.name || !form.profile_name) return toast('名称和 Profile 名称为必填', true);
 
@@ -679,7 +788,6 @@ async function saveExpert(id) {
         system_prompt: orig.system_prompt, feishu_app_id: orig.feishu_app_id,
         feishu_app_secret: orig.feishu_app_secret,
         skill_ids: orig.skill_ids, mcp_server_ids: orig.mcp_server_ids,
-        plugin_ids: orig.plugin_ids,
       };
       payload = {};
       for (const k of Object.keys(form)) {
@@ -762,10 +870,10 @@ async function loadMcps() {
   try {
     state.mcps = await api('/mcp-servers');
     const tb = document.getElementById('mcp-tbody');
-    if (!state.mcps.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">暂无 MCP Server</td></tr>'; return; }
+    if (!state.mcps.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">暂无 MCP Server</td></tr>'; return; }
     tb.innerHTML = state.mcps.map(m => `
       <tr>
-        <td>${m.id}</td><td><b>${esc(m.name)}</b></td><td><span class="tag">${esc(m.transport)}</span></td>
+        <td>${m.id}</td><td><b>${esc(m.name)}</b></td><td>${esc(m.category) || '-'}</td><td><span class="tag">${esc(m.transport)}</span></td>
         <td class="mono" style="max-width:280px;word-break:break-all">${esc(m.config_template)}</td>
         <td class="mono">${esc(m.tools_filter)}</td>
         <td style="white-space:nowrap">
@@ -786,6 +894,7 @@ function openMcpModal(id) {
   const m = id ? state.mcps.find(x => x.id === id) : null;
   openModalRaw(`<h3>${m ? '编辑 MCP Server' : '新建 MCP Server'}</h3><div class="form-grid">
     <div class="field"><label>名称</label><input id="f-name" value="${m ? esc(m.name) : ''}"></div>
+    <div class="field"><label>分类</label><input id="f-category" value="${m ? esc(m.category) : ''}" placeholder="例如 科研"></div>
     <div class="field"><label>传输方式</label>
       <select id="f-transport"><option value="http" ${m && m.transport === 'http' ? 'selected' : ''}>http</option>
       <option value="stdio" ${m && m.transport === 'stdio' ? 'selected' : ''}>stdio</option></select></div>
@@ -802,7 +911,7 @@ function openMcpModal(id) {
 
 async function saveMcp(id) {
   const body = { name: val('f-name'), transport: val('f-transport'),
-    config_template: val('f-config'), tools_filter: val('f-filter') };
+    config_template: val('f-config'), tools_filter: val('f-filter'), category: val('f-category') };
   if (!body.name) return toast('名称为必填', true);
   try { JSON.parse(body.config_template); JSON.parse(body.tools_filter); }
   catch (e) { return toast('JSON 格式错误：' + e.message, true); }
@@ -922,6 +1031,80 @@ async function toggleToolset(name, enabled) {
     await api(`/platform-tools/${encodeURIComponent(name)}`, 'PUT', { enabled });
     toast(enabled ? '已启用' : '已禁用'); loadToolsets();
   } catch (e) { toast(e.message, true); }
+}
+
+// ---------- 连接器（应用市场） ----------
+async function loadConnectors() {
+  try {
+    state.connectors = await api('/connectors');
+    const tb = document.getElementById('connectors-tbody');
+    if (!state.connectors.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">暂无连接器</td></tr>'; return; }
+    tb.innerHTML = state.connectors.map(c => `
+      <tr>
+        <td><b>${esc(c.icon)} ${esc(c.name)}</b></td>
+        <td><span class="tag">${esc(c.category) || '-'}</span></td>
+        <td style="max-width:280px;word-break:break-all">${esc(c.description) || '-'}</td>
+        <td class="mono" style="max-width:200px;word-break:break-all">${esc(c.config)}</td>
+        <td><span class="pill ${c.enabled ? 'ok' : 'err'}">${c.enabled ? '已启用' : '未启用'}</span></td>
+        <td style="white-space:nowrap">
+          ${c.enabled
+            ? `<button class="btn small" onclick="toggleConnector(${c.id}, false)">禁用</button>`
+            : `<button class="btn small" onclick="toggleConnector(${c.id}, true)">启用</button>`}
+          <button class="btn small" onclick="openConnectorModal(${c.id})">编辑</button>
+          <button class="btn small danger" onclick="delConnector(${c.id})">删除</button>
+        </td>
+      </tr>`).join('');
+  } catch (e) { toast(e.message, true); }
+}
+
+function openConnectorModal(id) {
+  const c = id ? state.connectors.find(x => x.id === id) : null;
+  openModalRaw(`<h3>${c ? '编辑连接器' : '新建连接器'}</h3><div class="form-grid">
+    <div class="field"><label>名称</label><input id="f-name" value="${c ? esc(c.name) : ''}"></div>
+    <div class="field"><label>图标（emoji）</label><input id="f-icon" value="${c ? esc(c.icon) : ''}" placeholder="例如 🏢"></div>
+    <div class="field"><label>分类</label><input id="f-category" value="${c ? esc(c.category) : ''}" placeholder="例如 即时通讯"></div>
+    <div class="field"><label>状态</label>
+      <select id="f-enabled">
+        <option value="false" ${c && !c.enabled ? 'selected' : ''}>未启用</option>
+        <option value="true" ${c && c.enabled ? 'selected' : ''}>已启用</option>
+      </select></div>
+    <div class="field full"><label>描述</label><input id="f-desc" value="${c ? esc(c.description) : ''}"></div>
+    <div class="field full"><label>配置（JSON，凭据等）</label>
+      <textarea id="f-config" class="tall mono">${c ? esc(c.config) : '{}'}</textarea></div>
+  </div>
+  <div class="modal-actions">
+    <button class="btn" onclick="closeModal()">取消</button>
+    <button class="btn primary" onclick="saveConnector(${c ? c.id : 'null'})">保存</button>
+  </div>`);
+}
+
+async function saveConnector(id) {
+  const body = {
+    name: val('f-name'), icon: val('f-icon'), category: val('f-category'),
+    description: val('f-desc'), config: val('f-config'),
+    enabled: val('f-enabled') === 'true',
+  };
+  if (!body.name) return toast('名称为必填', true);
+  try { JSON.parse(body.config); }
+  catch (e) { return toast('JSON 格式错误：' + e.message, true); }
+  try {
+    if (id) await api(`/connectors/${id}`, 'PUT', body);
+    else await api('/connectors', 'POST', body);
+    toast('已保存'); closeModal(); loadConnectors();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function toggleConnector(id, enabled) {
+  try {
+    await api(`/connectors/${id}`, 'PUT', { enabled });
+    toast(enabled ? '已启用' : '已禁用'); loadConnectors();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function delConnector(id) {
+  if (!confirm('确认删除该连接器？')) return;
+  try { await api(`/connectors/${id}`, 'DELETE'); toast('已删除'); loadConnectors(); }
+  catch (e) { toast(e.message, true); }
 }
 
 // ---------- 用户 ----------
